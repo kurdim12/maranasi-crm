@@ -52,8 +52,27 @@ function decodeBase64url(s: string): string {
 function encodeHeader(value: string): string {
   // eslint-disable-next-line no-control-regex
   if (/^[\x00-\x7F]*$/.test(value)) return value;
-  const b64 = base64url(new TextEncoder().encode(value)).replace(/-/g, '+').replace(/_/g, '/');
-  return `=?UTF-8?B?${b64}?=`;
+  // B-encoding requires standard padded base64 (RFC 2045), not base64url.
+  const bytes = new TextEncoder().encode(value);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return `=?UTF-8?B?${btoa(bin)}?=`;
+}
+
+/**
+ * A send failure where `ambiguous` means Gmail may have accepted the message
+ * even though we saw an error (5xx / network drop mid-request). Callers must
+ * NOT blindly retry ambiguous failures — that risks duplicate sends.
+ */
+export class GmailSendError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null,
+    readonly ambiguous: boolean,
+  ) {
+    super(message);
+    this.name = 'GmailSendError';
+  }
 }
 
 export interface SendArgs {
@@ -82,8 +101,23 @@ export async function gmailSend(env: Env, args: SendArgs): Promise<{ id: string;
   const payload: Record<string, string> = { raw };
   if (args.threadId) payload.threadId = args.threadId;
 
-  const res = await gmailFetch(env, '/messages/send', { method: 'POST', body: JSON.stringify(payload) });
-  if (!res.ok) throw new Error(`gmail send failed: ${res.status} ${await res.text()}`);
+  // Token refresh failures happen BEFORE the send and throw a plain Error
+  // (unambiguous: nothing was sent). Only the send request itself can be
+  // ambiguous.
+  const token = await getAccessToken(env);
+  let res: Response;
+  try {
+    res = await fetch(`${GMAIL_API}/messages/send`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    throw new GmailSendError(`gmail send network error: ${String(err)}`, null, true);
+  }
+  if (!res.ok) {
+    throw new GmailSendError(`gmail send failed: ${res.status} ${await res.text()}`, res.status, res.status >= 500);
+  }
   const data = (await res.json()) as { id: string; threadId: string };
   return data;
 }

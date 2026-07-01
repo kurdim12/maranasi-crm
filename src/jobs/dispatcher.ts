@@ -14,6 +14,7 @@ import { runSequenceEngine } from './sequence';
  *   hour 3, minute 30 UTC -> Daily Recap (06:30 Amman)
  */
 export async function dispatch(env: Env, scheduledTime: number): Promise<void> {
+  const invocationStart = Date.now();
   const d = new Date(scheduledTime);
   const hour = d.getUTCHours();
   // Cron fires on quarter hours; snap to the nearest one to be robust.
@@ -37,7 +38,9 @@ export async function dispatch(env: Env, scheduledTime: number): Promise<void> {
 
   if (hour === 1 && minute === 0) {
     try {
-      const r = await runScrape(env, 'cron');
+      // Budget from the invocation start, not the scrape start: the watcher
+      // and sequence engine already used part of the 15-min scheduled limit.
+      const r = await runScrape(env, 'cron', undefined, invocationStart + 13 * 60_000);
       console.log(`[cron] sourcing: ${JSON.stringify(r)}`);
     } catch (err) {
       await logError(env.DB, 'cron sourcing', err);

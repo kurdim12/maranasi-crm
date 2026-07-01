@@ -2,7 +2,7 @@ import type { Env, Lead } from '../env';
 import { isDryRun, isoPlus, nowIso } from '../env';
 import { logActivity, logError } from '../lib/activity';
 import { claudeClient, MODEL_FAST, parseJsonLoose, textOf } from '../lib/anthropic';
-import { gmailConfigured, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
+import { GmailSendError, gmailConfigured, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
 import { getDailyCap, getSentToday, incrementSentToday, isSendingPaused } from '../lib/kvconf';
 import { assertTransition, type LeadStatus } from '../lib/stateMachine';
 import { isWithinSendWindow } from '../lib/time';
@@ -100,13 +100,14 @@ async function flagExhaustedLeads(env: Env): Promise<number> {
   let count = 0;
   for (const lead of rows.results) {
     assertTransition(lead.status as LeadStatus, 'unresponsive_email');
-    await db
+    const res = await db
       .prepare(
         `UPDATE leads SET status = 'unresponsive_email', needs_call = 1,
          next_action_at = NULL, updated_at = ? WHERE id = ? AND status = 'contacted'`,
       )
       .bind(now, lead.id)
       .run();
+    if (!res.meta.changes) continue; // status moved on (e.g. a reply landed) — nothing happened, log nothing
     await logActivity(db, 'system', 'email_sequence_exhausted', lead.id, {
       from: 'contacted',
       to: 'unresponsive_email',
@@ -192,12 +193,16 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
       let threadId: string | undefined;
       let replySubject: string | undefined;
       if (step > 1) {
+        // Real threads only: dry-run rows carry synthetic thread ids that
+        // Gmail would reject after go-live. When DRY_RUN itself is on, thread
+        // continuity within the dry run is simulated below instead.
         const prevOut = await db
           .prepare(
             `SELECT gmail_thread_id, subject FROM email_log
-             WHERE lead_id = ? AND direction = 'out' ORDER BY id DESC LIMIT 1`,
+             WHERE lead_id = ? AND direction = 'out' AND dry_run = ?
+             ORDER BY id DESC LIMIT 1`,
           )
-          .bind(lead.id)
+          .bind(lead.id, dryRun ? 1 : 0)
           .first<{ gmail_thread_id: string | null; subject: string | null }>();
         threadId = prevOut?.gmail_thread_id ?? undefined;
         if (prevOut?.subject) {
@@ -209,7 +214,8 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
       const subject = step > 1 && replySubject ? replySubject : content.subject;
 
       // Guardrail 5: idempotency claim FIRST. If another tick already advanced
-      // this lead, changes = 0 and we skip.
+      // this lead — or a reply moved it out of the sequence (opted_out,
+      // interested, ...) since the eligibility SELECT — changes = 0 and we skip.
       const nextActionAt = isoPlus(72);
       const sentAt = nowIso();
       assertTransition(lead.status as LeadStatus, 'contacted'); // state machine check
@@ -217,7 +223,7 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
         .prepare(
           `UPDATE leads SET sequence_step = sequence_step + 1, status = 'contacted',
            last_contacted_at = ?, next_action_at = ?, updated_at = ?
-           WHERE id = ? AND sequence_step = ?`,
+           WHERE id = ? AND sequence_step = ? AND status IN ('verified','contacted')`,
         )
         .bind(sentAt, nextActionAt, sentAt, lead.id, lead.sequence_step)
         .run();
@@ -245,11 +251,35 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
           gmailMessageId = sent.id;
           gmailThreadId = sent.threadId;
         } catch (err) {
-          // Send failed after the claim: revert the claim so the lead retries.
+          if (err instanceof GmailSendError && err.ambiguous) {
+            // Gmail may have accepted the message (5xx / network drop after
+            // the request left). Reverting would risk a duplicate send, which
+            // is worse than a possibly-skipped step — keep the claim, record
+            // what was (maybe) sent, and flag it for the owner.
+            await db
+              .prepare(
+                `INSERT INTO email_log (lead_id, direction, sequence_step, subject, body, gmail_message_id, gmail_thread_id, dry_run)
+                 VALUES (?, 'out', ?, ?, ?, NULL, NULL, 0)`,
+              )
+              .bind(lead.id, step, subject, content.body)
+              .run();
+            await logActivity(db, 'system', 'send_uncertain', lead.id, {
+              step,
+              error: err.message,
+              note: 'gmail returned an ambiguous error; claim kept to avoid a duplicate send',
+            });
+            stats.sent++; // counts against the cap: it may have gone out
+            await incrementSentToday(env);
+            continue;
+          }
+          // Unambiguous failure (4xx, auth, thread lookup): nothing was sent.
+          // Revert the claim so the lead retries — but only if the row is
+          // still exactly as we claimed it (no concurrent transition).
           await db
             .prepare(
               `UPDATE leads SET sequence_step = ?, status = ?, last_contacted_at = ?,
-               next_action_at = ?, updated_at = ? WHERE id = ?`,
+               next_action_at = ?, updated_at = ?
+               WHERE id = ? AND sequence_step = ? AND status = 'contacted'`,
             )
             .bind(
               lead.sequence_step,
@@ -258,6 +288,7 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
               lead.next_action_at,
               nowIso(),
               lead.id,
+              lead.sequence_step + 1,
             )
             .run();
           await logError(db, `send step ${step} lead ${lead.id}`, err);

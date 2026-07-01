@@ -107,8 +107,11 @@ api.post('/leads/:id/call-outcome', async (c) => {
 
 api.post('/scrape/run', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { query_id?: number };
-  const stats = await runScrape(c.env, 'manual', body.query_id);
-  return c.json(stats);
+  // A full scrape can take minutes — far longer than a browser keeps the
+  // request open. Run it detached so a client disconnect can't kill it
+  // mid-run; progress lands in scrape_runs.
+  c.executionCtx.waitUntil(runScrape(c.env, 'manual', body.query_id));
+  return c.json({ ok: true, started: true, note: 'run started; watch GET /api/scrape/runs' }, 202);
 });
 
 api.get('/scrape/runs', async (c) => {

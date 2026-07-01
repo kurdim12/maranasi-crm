@@ -60,6 +60,16 @@ export async function verifyLead(env: Env, db: D1Database, lead: Lead): Promise<
     return { ok: false, reason: `lead status '${lead.status}' is not verifiable` };
   }
 
+  // A suppressed address (bounce / opt-out / manual) can never be re-verified
+  // while it stays on the suppression list — the address itself is burned.
+  const suppressed = await db
+    .prepare('SELECT reason FROM suppression WHERE email = ?')
+    .bind(lead.email.toLowerCase())
+    .first<{ reason: string }>();
+  if (suppressed) {
+    return { ok: false, reason: `email is on the suppression list (${suppressed.reason})` };
+  }
+
   const fail = async (reason: string): Promise<VerifyResult> => {
     if (lead.status !== 'invalid_email') {
       await transitionLead(db, lead, 'invalid_email', {

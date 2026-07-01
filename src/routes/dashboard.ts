@@ -239,10 +239,9 @@ export const DASHBOARD_HTML = `<!doctype html>
   document.getElementById('btn-filter').addEventListener('click', loadLeads);
   document.getElementById('f-q').addEventListener('keydown', function (e) { if (e.key === 'Enter') loadLeads(); });
   document.getElementById('btn-scrape').addEventListener('click', function () {
-    toast('scrape started...');
-    req('POST', '/api/scrape/run', {}).then(function (r) {
-      toast('scrape done: ' + r.newLeads + ' new, ' + r.skippedDupes + ' dupes'); loadStats(); loadLeads();
-    }).catch(function () { toast('scrape failed'); });
+    req('POST', '/api/scrape/run', {}).then(function () {
+      toast('scrape started in the background — refresh in a few minutes');
+    }).catch(function () { toast('scrape failed to start'); });
   });
   document.getElementById('btn-pause').addEventListener('click', function () {
     req('POST', '/api/sending/pause').then(loadStats);

@@ -190,6 +190,7 @@ export async function runReplyWatcher(env: Env): Promise<WatcherStats> {
   }
 
   const senderEmail = env.SENDER_EMAIL?.toLowerCase();
+  let failures = 0;
 
   for (const id of messageIds) {
     try {
@@ -215,8 +216,9 @@ export async function runReplyWatcher(env: Env): Promise<WatcherStats> {
       }
 
       const cls = await classifyReply(env, msg.subject, msg.bodyText);
-      await applyClassification(env, lead, cls, msg);
 
+      // Record the reply FIRST — this row is both the audit record and the
+      // dedupe key, so a failing side effect can never lose the reply.
       await db
         .prepare(
           `INSERT INTO email_log (lead_id, direction, subject, body, gmail_message_id, gmail_thread_id, classification, dry_run)
@@ -229,13 +231,50 @@ export async function runReplyWatcher(env: Env): Promise<WatcherStats> {
         summary: cls.summary,
         gmail_message_id: msg.id,
       });
+
+      try {
+        await applyClassification(env, lead, cls, msg);
+      } catch (err) {
+        // The reply is already recorded (deduped); surface the failed effect
+        // for owner review instead of dropping the message.
+        await logError(db, `apply classification lead ${lead.id} msg ${id}`, err);
+        await logActivity(db, 'system', 'reply_effect_failed', lead.id, {
+          classification: cls.label,
+          gmail_message_id: id,
+          error: String(err),
+        });
+      }
       stats.processed++;
       stats.matched++;
     } catch (err) {
+      failures++;
       await logError(db, `watcher message ${id}`, err);
     }
   }
 
-  if (newCursor) await env.KV.put(CURSOR_KEY, newCursor);
+  // Cursor policy: advance only when every message was either processed or
+  // deliberately skipped. On transient failures hold the cursor so the batch
+  // is re-listed next tick (already-processed messages dedupe via email_log).
+  // A poison message can't stall forever: after 3 held runs, advance and log.
+  const STALL_KEY = 'gmail:cursorStall';
+  if (newCursor) {
+    if (failures === 0) {
+      await env.KV.put(CURSOR_KEY, newCursor);
+      await env.KV.delete(STALL_KEY);
+    } else {
+      const stall = parseInt((await env.KV.get(STALL_KEY)) ?? '0', 10) + 1;
+      if (stall >= 3) {
+        await env.KV.put(CURSOR_KEY, newCursor);
+        await env.KV.delete(STALL_KEY);
+        await logActivity(db, 'system', 'watcher_cursor_forced', null, {
+          failures,
+          note: 'cursor advanced past repeatedly-failing messages after 3 stalled runs',
+        });
+      } else {
+        await env.KV.put(STALL_KEY, String(stall), { expirationTtl: 24 * 3600 });
+        await logActivity(db, 'system', 'watcher_cursor_held', null, { failures, stall });
+      }
+    }
+  }
   return stats;
 }

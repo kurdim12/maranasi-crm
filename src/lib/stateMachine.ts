@@ -45,7 +45,9 @@ const TRANSITIONS: Record<LeadStatus, LeadStatus[]> = {
   unresponsive_email: ['interested', 'not_interested', 'opted_out', 'invalid_email', 'dropped'],
   interested: ['not_interested', 'opted_out', 'dropped'],
   not_interested: ['interested', 'opted_out', 'dropped'],
-  invalid_email: ['verified'], // owner fixed the email and re-verified
+  // 'verified' = owner fixed the email and re-verified; reply edges = a real
+  // human answered from an address a bounce had marked dead.
+  invalid_email: ['verified', 'interested', 'not_interested', 'opted_out'],
   opted_out: [], // permanent, hard stop
   dropped: [], // terminal (row is kept)
 };
@@ -92,6 +94,29 @@ export async function transitionLead(
     if (opts.actor !== 'crm_agent') {
       throw new IllegalTransitionError(from, to, 'only the CRM agent can set dropped');
     }
+    // The gate must be backed by an explicit call log, not just the column
+    // value: the most recent call_outcome activity for this lead has to say
+    // 'unresponsive'. This blocks any path that flipped phone_status without
+    // an actual logged call.
+    const lastCall = await db
+      .prepare(
+        "SELECT detail FROM activities WHERE lead_id = ? AND action = 'call_outcome' ORDER BY id DESC LIMIT 1",
+      )
+      .bind(lead.id)
+      .first<{ detail: string | null }>();
+    let outcome: string | undefined;
+    try {
+      outcome = lastCall?.detail ? (JSON.parse(lastCall.detail) as { outcome?: string }).outcome : undefined;
+    } catch {
+      outcome = undefined;
+    }
+    if (outcome !== 'unresponsive') {
+      throw new IllegalTransitionError(
+        from,
+        to,
+        'no logged call with outcome=unresponsive found — log the call via mark_call_outcome first',
+      );
+    }
   }
 
   const sets: string[] = ['status = ?', 'updated_at = ?'];
@@ -105,8 +130,17 @@ export async function transitionLead(
     sets.push(`${col} = ?`);
     binds.push(val);
   }
-  binds.push(lead.id);
-  await db.prepare(`UPDATE leads SET ${sets.join(', ')} WHERE id = ?`).bind(...binds).run();
+  binds.push(lead.id, from);
+  // Compare-and-swap on status: if the row moved on since the caller read it,
+  // the transition no longer applies — fail loudly instead of clobbering
+  // (this makes resurrecting opted_out/dropped via stale reads impossible).
+  const result = await db
+    .prepare(`UPDATE leads SET ${sets.join(', ')} WHERE id = ? AND status = ?`)
+    .bind(...binds)
+    .run();
+  if (!result.meta.changes) {
+    throw new IllegalTransitionError(from, to, 'stale read: lead status changed concurrently');
+  }
 
   await logActivity(db, opts.actor, to === 'dropped' ? 'lead_dropped' : 'status_change', lead.id, {
     from,

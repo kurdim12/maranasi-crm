@@ -66,7 +66,7 @@ All `/api/*` routes require header `X-API-Key: <ADMIN_API_KEY>`.
 | `PATCH /api/leads/:id` | edit whitelisted fields |
 | `POST /api/leads/:id/verify` | re-run verification |
 | `POST /api/leads/:id/call-outcome` | `{outcome:'reached'\|'unresponsive'}` — the human phone gate |
-| `POST /api/scrape/run` | `{query_id?}` — manual sourcing run |
+| `POST /api/scrape/run` | `{query_id?}` — starts a sourcing run in the background (202); progress in `scrape_runs` |
 | `GET /api/scrape/runs` | recent runs |
 | `GET /api/stats` | pipeline stats + cap usage |
 | `POST /api/sending/pause` / `resume` | kill switch (KV `config:sending_paused`) |

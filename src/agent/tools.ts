@@ -198,6 +198,13 @@ export async function executeTool(
       const lead = await getLeadOr404(db, id);
       if (!lead) return { error: `lead ${id} not found` };
       const fields = (input.fields ?? {}) as Record<string, unknown>;
+      if (fields.phone_status === 'unresponsive') {
+        return {
+          error:
+            "phone_status='unresponsive' cannot be set via update_lead — it gates lead dropping and must " +
+            'come from an explicit call log. Use mark_call_outcome instead.',
+        };
+      }
       const rejected = Object.keys(fields).filter((k) => !UPDATE_WHITELIST.has(k));
       const accepted = Object.entries(fields).filter(([k]) => UPDATE_WHITELIST.has(k));
       if (!accepted.length) {

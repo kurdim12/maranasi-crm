@@ -33,6 +33,8 @@ export async function runScrape(
   env: Env,
   trigger: 'cron' | 'manual',
   queryId?: number,
+  /** absolute epoch-ms deadline (e.g. from the cron invocation start) */
+  deadlineMs?: number,
 ): Promise<ScrapeStats> {
   const db = env.DB;
   const run = await db
@@ -41,6 +43,7 @@ export async function runScrape(
     .first<{ id: number }>();
   const runId = run!.id;
   const startedAt = Date.now();
+  const deadline = Math.min(startedAt + RUN_BUDGET_MS, deadlineMs ?? Number.POSITIVE_INFINITY);
 
   let queriesRun = 0;
   let placesFound = 0;
@@ -57,7 +60,7 @@ export async function runScrape(
       : await db.prepare('SELECT * FROM search_queries WHERE active = 1 ORDER BY id').all<QueryRow>();
 
     for (const q of queries.results) {
-      if (Date.now() - startedAt > RUN_BUDGET_MS) {
+      if (Date.now() > deadline) {
         truncated = true;
         break;
       }
@@ -73,10 +76,11 @@ export async function runScrape(
       await db.prepare('UPDATE search_queries SET last_run_at = ? WHERE id = ?').bind(nowIso(), q.id).run();
 
       for (const place of places) {
-        if (Date.now() - startedAt > RUN_BUDGET_MS) {
+        if (Date.now() > deadline) {
           truncated = true;
           break;
         }
+        try {
         const domain = normalizeDomain(place.website);
 
         // Dedup by domain against existing leads.
@@ -150,12 +154,19 @@ export async function runScrape(
             }
           }
         }
+        } catch (err) {
+          // Politeness rule: tolerate per-place failures silently (log to the
+          // run), never abort the whole run for one bad site or a rare
+          // UNIQUE-constraint race with a concurrent run.
+          skippedDupes++;
+          await logError(db, `scrape place '${place.name}' run ${runId}`, err);
+        }
       }
     }
 
     // Verification runs right after sourcing.
     for (const id of enrichedLeadIds) {
-      if (Date.now() - startedAt > RUN_BUDGET_MS + 60_000) break;
+      if (Date.now() > deadline + 60_000) break;
       const lead = await db.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
       if (!lead) continue;
       try {
