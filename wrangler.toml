@@ -1,0 +1,30 @@
+# Maranasi Outreach Engine — Cloudflare Worker
+name = "maranasi-outreach-engine"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Single cron trigger. The internal dispatcher (src/jobs/dispatcher.ts) decides
+# which job runs on each tick based on UTC time. Do NOT add more schedules.
+[triggers]
+crons = ["*/15 * * * *"]
+
+[vars]
+DRY_RUN = "true"
+DAILY_SEND_CAP = "20"
+
+# After `wrangler d1 create maranasi-crm`, paste the real database_id here.
+[[d1_databases]]
+binding = "DB"
+database_name = "maranasi-crm"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# After `wrangler kv namespace create KV`, paste the real id here.
+[[kv_namespaces]]
+binding = "KV"
+id = "0000000000000000000000000000000000"
+
+# Secrets (set with `wrangler secret put <NAME>`):
+#   ANTHROPIC_API_KEY, ADMIN_API_KEY, GOOGLE_PLACES_API_KEY,
+#   GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN,
+#   RECAP_EMAIL, SENDER_EMAIL, SENDER_NAME, VERIFIER_API_KEY (optional)
