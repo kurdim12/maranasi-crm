@@ -18,6 +18,13 @@ interface RecapData {
   cap_usage: string;
   scrape_runs: unknown[];
   errors: unknown[];
+  pipeline: {
+    moved_24h: unknown[];
+    open_deals: number;
+    open_value: number;
+    won_24h: number;
+    lost_24h: number;
+  };
 }
 
 async function gatherRecapData(env: Env): Promise<RecapData> {
@@ -89,7 +96,33 @@ async function gatherRecapData(env: Env): Promise<RecapData> {
   const sentToday = await getSentToday(env);
   const cap = await getDailyCap(env);
 
+  const dealMoves = await db
+    .prepare(
+      `SELECT a.detail, a.created_at, l.company_name FROM activities a LEFT JOIN leads l ON l.id = a.lead_id
+       WHERE a.action = 'deal_stage_changed' AND a.created_at >= ? ORDER BY a.id DESC LIMIT 20`,
+    )
+    .bind(since)
+    .all();
+  const dealTotals = await db
+    .prepare(
+      `SELECT
+        SUM(CASE WHEN stage NOT IN ('won','lost') THEN 1 ELSE 0 END) AS open_deals,
+        SUM(CASE WHEN stage NOT IN ('won','lost') THEN COALESCE(value_usd,0) ELSE 0 END) AS open_value,
+        SUM(CASE WHEN stage = 'won' AND updated_at >= ? THEN 1 ELSE 0 END) AS won_24h,
+        SUM(CASE WHEN stage = 'lost' AND updated_at >= ? THEN 1 ELSE 0 END) AS lost_24h
+       FROM deals`,
+    )
+    .bind(since, since)
+    .first<{ open_deals: number; open_value: number; won_24h: number; lost_24h: number }>();
+
   return {
+    pipeline: {
+      moved_24h: dealMoves.results,
+      open_deals: dealTotals?.open_deals ?? 0,
+      open_value: dealTotals?.open_value ?? 0,
+      won_24h: dealTotals?.won_24h ?? 0,
+      lost_24h: dealTotals?.lost_24h ?? 0,
+    },
     date: new Date().toISOString().slice(0, 10),
     new_leads_by_city: Object.fromEntries(newByCity.results.map((r) => [r.city, r.n])),
     verified_count: verified?.n ?? 0,
@@ -118,6 +151,9 @@ function plainRecap(data: RecapData): { subject: string; body: string } {
     '',
     `Needs call (${data.needs_call.length}):`,
     data.needs_call.length ? JSON.stringify(data.needs_call, null, 1) : 'None.',
+    '',
+    `DEALS: ${data.pipeline.open_deals} open ($${data.pipeline.open_value}) · won 24h: ${data.pipeline.won_24h} · lost 24h: ${data.pipeline.lost_24h}`,
+    data.pipeline.moved_24h.length ? `Stage moves: ${JSON.stringify(data.pipeline.moved_24h, null, 1)}` : 'No stage moves.',
     '',
     `Drops: ${data.drops.length ? JSON.stringify(data.drops) : 'None.'}`,
     `Errors: ${data.errors.length ? JSON.stringify(data.errors) : 'None.'}`,

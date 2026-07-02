@@ -69,6 +69,9 @@ function ratesCard(a) {
       <div class="kpi"><div class="v num">${r.reply_rate || 0}%</div><div class="l"><i style="background:var(--ok)"></i>reply rate</div></div>
       <div class="kpi"><div class="v num">${bounceRate}%</div><div class="l"><i style="background:${bounceRate > 3 ? 'var(--warn)' : 'var(--ok)'}"></i>bounce rate</div></div>
       <div class="kpi"><div class="v num">${r.interested || 0}</div><div class="l"><i style="background:var(--ok)"></i>interested</div></div>
+      ${r.win_rate !== null && r.win_rate !== undefined
+        ? `<div class="kpi"><div class="v num">${r.win_rate}%</div><div class="l"><i style="background:var(--ok)"></i>win rate (${r.won}W/${r.lost}L)</div></div>`
+        : ''}
     </div>
     <div class="hint" style="margin-top:8px">Bounce rate above 3% auto-pauses sending.</div>
   </div>`;

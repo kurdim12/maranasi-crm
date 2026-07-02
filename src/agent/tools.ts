@@ -138,6 +138,44 @@ export const TOOL_DEFINITIONS: ToolSpec[] = [
       required: ['id'],
     },
   },
+  {
+    name: 'create_task',
+    description: 'Create a task, optionally attached to a lead. Use for follow-ups the owner asks you to remember.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        lead_id: { type: 'integer' },
+        due_at: { type: 'string', description: 'YYYY-MM-DD or full timestamp, optional' },
+      },
+      required: ['title'],
+    },
+  },
+  {
+    name: 'complete_task',
+    description: 'Mark a task done by id.',
+    input_schema: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] },
+  },
+  {
+    name: 'update_deal_stage',
+    description:
+      "Move a deal to a new stage (new | call_scheduled | proposal_sent | negotiation | won | lost). 'lost' requires lost_reason; won/lost are terminal.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        deal_id: { type: 'integer' },
+        stage: { type: 'string', enum: ['new', 'call_scheduled', 'proposal_sent', 'negotiation', 'won', 'lost'] },
+        lost_reason: { type: 'string' },
+        value_usd: { type: 'integer', description: 'optional deal value to record at the same time' },
+      },
+      required: ['deal_id', 'stage'],
+    },
+  },
+  {
+    name: 'get_pipeline',
+    description: 'List deals grouped by stage with values, plus win/loss totals.',
+    input_schema: { type: 'object', properties: {} },
+  },
 ];
 
 const UPDATE_WHITELIST = new Set([
@@ -403,6 +441,70 @@ export async function executeTool(
       if (draft === null) return { error: 'no LLM provider configured' };
       await logActivity(db, 'crm_agent', 'reply_drafted', id, {});
       return { draft, note: 'Draft only — review it, then send from the lead drawer (Reply box).' };
+    }
+
+    case 'create_task': {
+      const title = String(input.title ?? '').trim();
+      if (!title) return { error: 'title required' };
+      const leadId = input.lead_id ? Number(input.lead_id) : null;
+      if (leadId) {
+        const lead = await getLeadOr404(db, leadId);
+        if (!lead) return { error: `lead ${leadId} not found` };
+      }
+      const { createTaskOnce } = await import('../lib/pipelineHooks');
+      const taskId = await createTaskOnce(db, leadId, null, title, 'agent', input.due_at ? String(input.due_at) : null);
+      if (!taskId) return { error: 'an identical open task already exists for that lead' };
+      return { ok: true, task_id: taskId, title };
+    }
+
+    case 'complete_task': {
+      const id = Number(input.id);
+      const res = await db.prepare("UPDATE tasks SET done_at = datetime('now') WHERE id = ? AND done_at IS NULL").bind(id).run();
+      if (!res.meta.changes) return { error: `task ${id} not found or already done` };
+      const task = await db.prepare('SELECT lead_id, title FROM tasks WHERE id = ?').bind(id).first<{ lead_id: number | null; title: string }>();
+      await logActivity(db, 'crm_agent', 'task_completed', task?.lead_id ?? null, { task_id: id, title: task?.title });
+      return { ok: true, task_id: id };
+    }
+
+    case 'update_deal_stage': {
+      const dealId = Number(input.deal_id);
+      const deal = await db.prepare('SELECT * FROM deals WHERE id = ?').bind(dealId)
+        .first<{ id: number; lead_id: number; stage: string }>();
+      if (!deal) return { error: `deal ${dealId} not found` };
+      const stage = String(input.stage ?? '');
+      const { transitionDeal } = await import('../lib/dealMachine');
+      try {
+        await transitionDeal(db, dealId, deal.stage, stage as never, {
+          lost_reason: input.lost_reason ? String(input.lost_reason) : null,
+        });
+      } catch (e) {
+        return { error: e instanceof Error ? e.message : 'illegal transition' };
+      }
+      if (input.value_usd !== undefined && input.value_usd !== null) {
+        await db.prepare("UPDATE deals SET value_usd = ?, updated_at = datetime('now') WHERE id = ?")
+          .bind(Number(input.value_usd), dealId)
+          .run();
+      }
+      await logActivity(db, 'crm_agent', 'deal_stage_changed', deal.lead_id, {
+        deal_id: dealId, from: deal.stage, to: stage,
+        ...(input.lost_reason ? { lost_reason: String(input.lost_reason) } : {}),
+      });
+      return { ok: true, deal_id: dealId, stage };
+    }
+
+    case 'get_pipeline': {
+      const rows = await db
+        .prepare(
+          `SELECT d.id, d.stage, d.value_usd, d.expected_close, d.next_step, l.company_name, l.id AS lead_id
+           FROM deals d JOIN leads l ON l.id = d.lead_id ORDER BY d.updated_at DESC LIMIT 50`,
+        )
+        .all();
+      const byStage: Record<string, unknown[]> = {};
+      for (const d of rows.results as Record<string, unknown>[]) {
+        const s = String(d.stage);
+        (byStage[s] ??= []).push(d);
+      }
+      return { by_stage: byStage, total: rows.results.length };
     }
 
     default:

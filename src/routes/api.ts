@@ -8,6 +8,7 @@ import { isManagedKey, listSettings, putSetting } from '../lib/config';
 import { parseLeadsCsv, toCsv } from '../lib/csv';
 import { normalizeDomain } from '../lib/crawler';
 import { removeDemoData, seedDemoData } from '../lib/demoData';
+import { transitionDeal } from '../lib/dealMachine';
 import { createTaskOnce, markLeadReplied, resolvedTriage } from '../lib/pipelineHooks';
 import { gmailConfigured, gmailGetProfile, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
 import { getHealth } from '../lib/health';
@@ -194,7 +195,13 @@ api.get('/leads/:id', async (c) => {
   )
     .bind(id)
     .all();
-  return c.json({ lead, emails: emails.results, activities: activities.results });
+  const deals = await c.env.DB.prepare('SELECT * FROM deals WHERE lead_id = ? ORDER BY id DESC LIMIT 10').bind(id).all();
+  const tasks = await c.env.DB.prepare(
+    'SELECT * FROM tasks WHERE lead_id = ? AND done_at IS NULL ORDER BY due_at IS NULL, due_at ASC LIMIT 20',
+  )
+    .bind(id)
+    .all();
+  return c.json({ lead, emails: emails.results, activities: activities.results, deals: deals.results, tasks: tasks.results });
 });
 
 api.patch('/leads/:id', async (c) => {
@@ -463,6 +470,61 @@ api.post('/leads/:id/draft', async (c) => {
   return c.json({ ok: true, draft });
 });
 
+/** Pipeline: deals grouped by stage with per-column totals. */
+api.get('/pipeline', async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT d.*, l.company_name, l.city, l.country, l.status AS lead_status, l.email AS lead_email
+     FROM deals d JOIN leads l ON l.id = d.lead_id ORDER BY d.updated_at DESC LIMIT 300`,
+  ).all();
+  const winRow = await c.env.DB.prepare(
+    `SELECT SUM(CASE WHEN stage='won' THEN 1 ELSE 0 END) AS won,
+            SUM(CASE WHEN stage='lost' THEN 1 ELSE 0 END) AS lost,
+            SUM(CASE WHEN stage='won' THEN COALESCE(value_usd,0) ELSE 0 END) AS won_value
+     FROM deals`,
+  ).first<{ won: number; lost: number; won_value: number }>();
+  return c.json({ deals: rows.results, won: winRow?.won ?? 0, lost: winRow?.lost ?? 0, won_value: winRow?.won_value ?? 0 });
+});
+
+/** Update a deal: stage moves go through the deal machine (won/lost terminal, lost needs a reason). */
+api.patch('/deals/:id', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const deal = await c.env.DB.prepare('SELECT * FROM deals WHERE id = ?').bind(id)
+    .first<{ id: number; lead_id: number; stage: string }>();
+  if (!deal) return c.json({ error: 'not found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+
+  if (typeof body.stage === 'string' && body.stage !== deal.stage) {
+    try {
+      await transitionDeal(c.env.DB, id, deal.stage, body.stage as never, {
+        lost_reason: typeof body.lost_reason === 'string' ? body.lost_reason : null,
+      });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : 'illegal transition' }, 400);
+    }
+    await logActivity(c.env.DB, 'owner', 'deal_stage_changed', deal.lead_id, {
+      deal_id: id, from: deal.stage, to: body.stage,
+      ...(typeof body.lost_reason === 'string' ? { lost_reason: body.lost_reason } : {}),
+    });
+  }
+
+  const fields: string[] = [];
+  const binds: unknown[] = [];
+  for (const key of ['value_usd', 'expected_close', 'next_step'] as const) {
+    if (key in body) {
+      fields.push(`${key} = ?`);
+      binds.push(body[key] === '' || body[key] === null ? null : key === 'value_usd' ? Number(body[key]) : String(body[key]));
+    }
+  }
+  if (fields.length) {
+    await c.env.DB.prepare(`UPDATE deals SET ${fields.join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+      .bind(...binds, id)
+      .run();
+    await logActivity(c.env.DB, 'owner', 'deal_updated', deal.lead_id, { deal_id: id, fields: fields.map((f) => f.split(' ')[0]) });
+  }
+  const fresh = await c.env.DB.prepare('SELECT * FROM deals WHERE id = ?').bind(id).first();
+  return c.json({ ok: true, deal: fresh });
+});
+
 /** Everything the Today home screen needs, in one request. */
 api.get('/today', async (c) => {
   const db = c.env.DB;
@@ -570,6 +632,13 @@ api.get('/analytics', async (c) => {
     )
     .first<{ sent: number; replies: number; bounces: number; interested: number }>();
 
+  const dealWins = await db
+    .prepare(
+      `SELECT SUM(CASE WHEN stage='won' THEN 1 ELSE 0 END) AS won,
+              SUM(CASE WHEN stage='lost' THEN 1 ELSE 0 END) AS lost FROM deals`,
+    )
+    .first<{ won: number; lost: number }>();
+
   const byCountry = await db
     .prepare(
       `SELECT COALESCE(country, '??') AS country, COUNT(*) AS total,
@@ -596,6 +665,12 @@ api.get('/analytics', async (c) => {
       interested: totals?.interested ?? 0,
       reply_rate: sent ? Math.round(((totals?.replies ?? 0) / sent) * 1000) / 10 : 0,
       bounce_rate: sent ? Math.round(((totals?.bounces ?? 0) / sent) * 1000) / 10 : 0,
+      won: dealWins?.won ?? 0,
+      lost: dealWins?.lost ?? 0,
+      win_rate:
+        (dealWins?.won ?? 0) + (dealWins?.lost ?? 0) > 0
+          ? Math.round(((dealWins?.won ?? 0) / ((dealWins?.won ?? 0) + (dealWins?.lost ?? 0))) * 1000) / 10
+          : null,
     },
     by_country: byCountry.results,
   });

@@ -53,6 +53,30 @@ export function openLead(id) {
     </div>
     <div class="hint-bar">Logging "no answer" is the human gate that later allows the agent to drop this lead.</div></div>`;
 
+    const deal = (data.deals || []).find((d) => d.stage !== 'won' && d.stage !== 'lost') || (data.deals || [])[0];
+    if (deal) {
+      const STAGES = ['new', 'call_scheduled', 'proposal_sent', 'negotiation', 'won', 'lost'];
+      const terminal = deal.stage === 'won' || deal.stage === 'lost';
+      h += `<div class="sect"><h3>Deal ${deal.stage === 'won' ? '· WON' : deal.stage === 'lost' ? '· LOST' : ''}</h3>
+        <div class="frow"><label>stage</label>${
+          terminal
+            ? `<span class="mono">${esc(deal.stage)}${deal.lost_reason ? ` — ${esc(deal.lost_reason)}` : ''}</span>`
+            : `<select id="dl-stage">${STAGES.map((s) => `<option value="${s}"${s === deal.stage ? ' selected' : ''}>${s.replace(/_/g, ' ')}</option>`).join('')}</select>`
+        }</div>
+        <div class="frow"><label>value USD</label><input id="dl-value" class="mono" value="${deal.value_usd ?? ''}" ${terminal ? 'disabled' : ''}></div>
+        <div class="frow"><label>expected close</label><input id="dl-close" class="mono" placeholder="YYYY-MM-DD" value="${esc(deal.expected_close ? String(deal.expected_close).slice(0, 10) : '')}" ${terminal ? 'disabled' : ''}></div>
+        <div class="frow"><label>next step</label><input id="dl-next" value="${esc(deal.next_step)}" ${terminal ? 'disabled' : ''}></div>
+        ${terminal ? '' : '<div class="actions"><button id="dl-save">Save deal</button></div>'}
+      </div>`;
+    }
+
+    const tasks = data.tasks || [];
+    h += `<div class="sect"><h3>Tasks (${tasks.length})</h3>${
+      tasks.map((t) => `<div class="frow"><button class="ghost dl-task-done" data-task="${t.id}" title="Mark done">◯</button>
+        <span style="flex:1">${esc(t.title)}</span>
+        <span class="mono" style="color:var(--t3)">${t.due_at ? esc(String(t.due_at).slice(0, 10)) : ''}</span></div>`).join('')
+    }<div class="actions"><button id="dl-task-add" class="ghost">+ Task for this lead</button></div></div>`;
+
     if (l.email) {
       const replySubject = lastSubject ? (lastSubject.startsWith('Re:') ? lastSubject : `Re: ${lastSubject}`) : '';
       h += `<div class="sect"><h3>Reply / compose (sends for real via Gmail)</h3>
@@ -117,6 +141,31 @@ export function openLead(id) {
       req('POST', `/api/leads/${id}/sequence/pause`).then(() => { toast('Follow-ups paused'); changed(); reopen(); });
     if ($('d-resume')) $('d-resume').onclick = () =>
       req('POST', `/api/leads/${id}/sequence/resume`).then(() => { toast('Follow-ups resumed', 'ok'); changed(); reopen(); });
+    if ($('dl-save') && deal) $('dl-save').onclick = () => {
+      const newStage = $('dl-stage') ? $('dl-stage').value : deal.stage;
+      const body = {
+        value_usd: $('dl-value').value.trim() ? parseInt($('dl-value').value.replace(/[^\d]/g, ''), 10) : null,
+        expected_close: $('dl-close').value.trim() || null,
+        next_step: $('dl-next').value.trim() || null,
+      };
+      if (newStage !== deal.stage) {
+        body.stage = newStage;
+        if (newStage === 'lost') {
+          const reason = window.prompt('Why was it lost? (required)');
+          if (!reason || !reason.trim()) { toast('Lost needs a reason', 'err'); return; }
+          body.lost_reason = reason.trim();
+        }
+      }
+      req('PATCH', `/api/deals/${deal.id}`, body).then(() => { toast('Deal saved', 'ok'); changed(); reopen(); });
+    };
+    document.querySelectorAll('.dl-task-done').forEach((b) => {
+      b.onclick = () => req('POST', `/api/tasks/${b.dataset.task}/done`).then(() => { toast('Task done', 'ok'); changed(); reopen(); });
+    });
+    if ($('dl-task-add')) $('dl-task-add').onclick = () => {
+      const titleText = window.prompt('Task title');
+      if (!titleText || !titleText.trim()) return;
+      req('POST', '/api/tasks', { title: titleText.trim(), lead_id: id }).then(() => { toast('Task added', 'ok'); changed(); reopen(); });
+    };
     if ($('re-send')) $('re-send').onclick = () => {
       const subject = $('re-subject').value.trim();
       const body = $('re-body').value.trim();
