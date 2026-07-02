@@ -32,12 +32,11 @@ Workers (Hono + D1 + KV) with one cron trigger and an internal dispatcher.
 npm install
 cp .dev.vars.example .dev.vars          # local secrets
 
-# Cloudflare resources (once)
-wrangler d1 create maranasi-crm         # paste database_id into wrangler.toml
-wrangler kv namespace create KV         # paste id into wrangler.toml
+# Cloudflare resources: ALREADY PROVISIONED and wired into wrangler.toml
+#   D1  maranasi-crm      d1f958ff-a5d3-4e7d-8b69-f15dc774db83 (schema + seeds applied)
+#   KV  maranasi-crm-kv   35de807c8d26456292f0852508e0595d
 
-# schema + seeds
-npm run migrate:local                   # or migrate:remote
+npm run migrate:local                   # local dev schema (remote is already migrated)
 
 # secrets (production)
 wrangler secret put ADMIN_API_KEY
@@ -46,7 +45,7 @@ wrangler secret put GOOGLE_PLACES_API_KEY
 # Gmail secrets: see scripts/gmail-auth.md
 
 npm run dev                             # local
-npm run deploy                          # production
+npm run deploy                          # production (requires `wrangler login`)
 ```
 
 `DRY_RUN=true` by default: every "send" is logged to `email_log`

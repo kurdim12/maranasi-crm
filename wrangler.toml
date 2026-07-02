@@ -13,16 +13,14 @@ crons = ["*/15 * * * *"]
 DRY_RUN = "true"
 DAILY_SEND_CAP = "20"
 
-# After `wrangler d1 create maranasi-crm`, paste the real database_id here.
 [[d1_databases]]
 binding = "DB"
 database_name = "maranasi-crm"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "d1f958ff-a5d3-4e7d-8b69-f15dc774db83"
 
-# After `wrangler kv namespace create KV`, paste the real id here.
 [[kv_namespaces]]
 binding = "KV"
-id = "0000000000000000000000000000000000"
+id = "35de807c8d26456292f0852508e0595d"
 
 # Secrets (set with `wrangler secret put <NAME>`):
 #   ANTHROPIC_API_KEY, ADMIN_API_KEY, GOOGLE_PLACES_API_KEY,
