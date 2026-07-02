@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeBrief } from '../src/lib/brief';
+import { channelLink, defaultChannel, fillChannelTemplate } from '../src/lib/channels';
 import { extractSocials, stripHtml } from '../src/lib/crawler';
 import { assertDealTransition, DEAL_STAGES, IllegalDealTransition } from '../src/lib/dealMachine';
 import { resolvedTriage, triageForInbound } from '../src/lib/pipelineHooks';
@@ -45,6 +46,27 @@ describe('inbox triage defaults', () => {
     expect(resolvedTriage('out')).toBe('waiting');
     expect(resolvedTriage('in')).toBe('done');
     expect(resolvedTriage(null)).toBe('done');
+  });
+});
+
+describe('multichannel assist (P5) — links only, never sends', () => {
+  const lead = { phone: '+84 28 3829-2185', line_id: null, country: 'VN', preferred_channel: null } as never;
+  it('country defaults: VN→zalo, TH→line, else whatsapp; preference wins', () => {
+    expect(defaultChannel({ country: 'VN', preferred_channel: null } as never)).toBe('zalo');
+    expect(defaultChannel({ country: 'TH', preferred_channel: null } as never)).toBe('line');
+    expect(defaultChannel({ country: null, preferred_channel: null } as never)).toBe('whatsapp');
+    expect(defaultChannel({ country: 'VN', preferred_channel: 'whatsapp' } as never)).toBe('whatsapp');
+  });
+  it('builds deep links from what the lead has, null otherwise', () => {
+    expect(channelLink(lead, 'whatsapp', 'hi there')).toBe('https://wa.me/842838292185?text=hi%20there');
+    expect(channelLink(lead, 'zalo', 'x')).toBe('https://zalo.me/842838292185');
+    expect(channelLink(lead, 'line', 'x')).toBeNull(); // no LINE ID yet
+    expect(channelLink({ phone: null, line_id: 'lotus-duc' } as never, 'line', 'x')).toBe('https://line.me/R/ti/p/~lotus-duc');
+    expect(channelLink({ phone: '12', line_id: null } as never, 'whatsapp', 'x')).toBeNull(); // junk phone
+  });
+  it('fills chat templates with graceful fallbacks', () => {
+    expect(fillChannelTemplate('Hi {{contact_name}} of {{company_name}}', { company_name: 'Lotus', contact_name: null, city: null } as never))
+      .toBe('Hi there of Lotus');
   });
 });
 

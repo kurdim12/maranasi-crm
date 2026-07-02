@@ -101,7 +101,7 @@ export function keys(k, e) {
 function renderTemplates() {
   const body = $('sys-body');
   body.innerHTML = skeletons(4);
-  req('GET', '/api/templates').then((data) => {
+  Promise.all([req('GET', '/api/templates'), req('GET', '/api/config/channel-templates')]).then(([data, ch]) => {
     if (!$('sys-body')) return;
     let h = '<div class="placeholders" style="margin-bottom:12px">Available placeholders: ' +
       '<code>{{company_name}}</code> <code>{{contact_name}}</code> <code>{{city}}</code> <code>{{category}}</code> <code>{{sender_name}}</code>' +
@@ -117,6 +117,12 @@ function renderTemplates() {
         ${(t.body_template || '').indexOf('PLACEHOLDER') !== -1 ? chip('placeholder copy — replace before go-live', 'var(--warn)') : ''}
         </div></div>`;
     });
+    h += `<div class="tpl"><div class="top">${chip('channels', 'var(--info)')}<b>Chat intro messages (WhatsApp · Zalo · Line)</b></div>
+      <div class="placeholders" style="margin-bottom:8px">Prefilled when you open a channel from a lead — manual send only, same {{placeholders}}.</div>
+      ${['whatsapp', 'zalo', 'line'].map((c) => `
+        <div style="margin-bottom:8px"><label style="color:var(--t3);font-size:12px">${c}</label>
+        <textarea class="ch-tpl" data-ch="${c}" rows="2" aria-label="${c} intro template">${esc(ch.templates[c] || '')}</textarea></div>`).join('')}
+      <div class="foot"><button class="primary" id="ch-save">Save chat intros</button></div></div>`;
     $('sys-body').innerHTML = h || emptyHtml('No templates.');
     $('sys-body').querySelectorAll('.tpl[data-id]').forEach((el) => {
       const save = el.querySelector('.t-save');
@@ -128,6 +134,11 @@ function renderTemplates() {
         }).then(() => { toast('Template saved', 'ok'); renderTemplates(); });
       };
     });
+    $('ch-save').onclick = () => {
+      const templates = {};
+      $('sys-body').querySelectorAll('.ch-tpl').forEach((t) => { templates[t.dataset.ch] = t.value; });
+      req('PUT', '/api/config/channel-templates', { templates }).then(() => toast('Chat intros saved', 'ok'));
+    };
   }).catch(() => {});
 }
 

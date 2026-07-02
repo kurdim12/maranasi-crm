@@ -43,6 +43,10 @@ export function openLead(id) {
       <div class="frow"><label>phone</label><input id="ed-phone" class="mono" value="${esc(l.phone)}"></div>
       <div class="frow"><label>city</label><input id="ed-city" value="${esc(l.city)}"></div>
       <div class="frow"><label>category</label><input id="ed-category" value="${esc(l.category)}"></div>
+      <div class="frow"><label>preferred channel</label><select id="ed-preferred_channel" aria-label="Preferred channel">
+        ${['', 'whatsapp', 'zalo', 'line', 'email'].map((c) => `<option value="${c}"${(l.preferred_channel || '') === c ? ' selected' : ''}>${c || 'auto (by country)'}</option>`).join('')}
+      </select></div>
+      <div class="frow"><label>LINE ID</label><input id="ed-line_id" class="mono" value="${esc(l.line_id)}"></div>
       <div class="frow"><label>notes</label><textarea id="ed-notes" rows="4">${esc(l.notes)}</textarea></div>
       <div class="actions"><button class="primary" id="d-save">Save changes</button></div>
     </div>`;
@@ -82,6 +86,19 @@ export function openLead(id) {
             .join('')}</span></div>`
         : ''
     }<div class="actions"><button id="d-brief" class="ghost">${brief ? '↻ Rebuild brief' : '✦ Build brief'}</button></div></div>`;
+
+    // ---- Channels (P5): manual deep links only — never automated ----
+    const digits = (l.phone || '').replace(/[^\d]/g, '');
+    const defChan = l.preferred_channel || (l.country === 'VN' ? 'zalo' : l.country === 'TH' ? 'line' : 'whatsapp');
+    h += `<div class="sect"><h3>Channels <span class="hint" style="text-transform:none;letter-spacing:0">manual only — opens the app, you hit send</span></h3>
+      <div class="actions">
+        <button class="ch-btn${defChan === 'whatsapp' ? ' primary' : ''}" data-ch="whatsapp" ${digits.length >= 7 ? '' : 'disabled title="needs a phone number"'}>WhatsApp</button>
+        <button class="ch-btn${defChan === 'zalo' ? ' primary' : ''}" data-ch="zalo" ${digits.length >= 7 ? '' : 'disabled title="needs a phone number"'}>Zalo</button>
+        ${l.line_id
+          ? `<button class="ch-btn${defChan === 'line' ? ' primary' : ''}" data-ch="line">Line</button>`
+          : '<button id="ch-line-add" class="ghost">+ add LINE ID</button>'}
+        <button id="ch-log" class="ghost">✓ Log touch</button>
+      </div></div>`;
 
     const deal = (data.deals || []).find((d) => d.stage !== 'won' && d.stage !== 'lost') || (data.deals || [])[0];
     if (deal) {
@@ -166,7 +183,8 @@ export function openLead(id) {
     $('d-close').onclick = closeDrawer;
     $('d-save').onclick = () => {
       const body = { notes: $('ed-notes').value };
-      ['contact_name', 'phone', 'city', 'category'].forEach((f) => { body[f] = $(`ed-${f}`).value; });
+      ['contact_name', 'phone', 'city', 'category', 'line_id'].forEach((f) => { body[f] = $(`ed-${f}`).value; });
+      body.preferred_channel = $('ed-preferred_channel').value || null;
       req('PATCH', `/api/leads/${id}`, body).then(() => { toast('Lead saved', 'ok'); changed(); reopen(); });
     };
     const logCall = async (outcome, label) => {
@@ -184,6 +202,50 @@ export function openLead(id) {
     $('d-noanswer').onclick = () => logCall('unresponsive', 'Call: no answer');
     $('d-verify').onclick = () =>
       req('POST', `/api/leads/${id}/verify`).then((r) => { toast(`Verification: ${r.reason}`, r.ok ? 'ok' : 'err'); changed(); reopen(); });
+    // Channel deep links: fill the per-channel template client-side, open the
+    // app, log the touch. Zalo ignores URL prefill → copy text to clipboard.
+    document.querySelectorAll('.ch-btn').forEach((b) => {
+      b.onclick = async () => {
+        const ch = b.dataset.ch;
+        const cfg = await req('GET', '/api/config/channel-templates').catch(() => null);
+        const tpl = (cfg && cfg.templates && cfg.templates[ch]) || 'Hi {{contact_name}}, Rami from Maranasi Events — quick chat about {{company_name}}?';
+        const text = tpl
+          .replace(/\{\{\s*company_name\s*\}\}/g, l.company_name || 'your company')
+          .replace(/\{\{\s*contact_name\s*\}\}/g, l.contact_name || 'there')
+          .replace(/\{\{\s*city\s*\}\}/g, l.city || 'your city');
+        let url = null;
+        if (ch === 'whatsapp') url = `https://wa.me/${digits}?text=${encodeURIComponent(text)}`;
+        else if (ch === 'zalo') {
+          url = `https://zalo.me/${digits}`;
+          try { await navigator.clipboard.writeText(text); toast('Intro copied — paste it in Zalo', 'ok'); } catch { /* clipboard denied */ }
+        } else if (ch === 'line') url = `https://line.me/R/ti/p/~${encodeURIComponent(l.line_id)}`;
+        if (!url) return;
+        window.open(url, '_blank', 'noopener');
+        req('POST', `/api/leads/${id}/touch`, { channel: ch }).then(() => { changed(); });
+      };
+    });
+    if ($('ch-line-add')) $('ch-line-add').onclick = async () => {
+      const ans = await inputModal({
+        title: 'Add LINE ID',
+        fields: [{ key: 'line_id', label: 'LINE ID', placeholder: 'their LINE ID (not display name)', required: true }],
+        confirmLabel: 'Save',
+      });
+      if (!ans) return;
+      req('PATCH', `/api/leads/${id}`, { line_id: ans.line_id }).then(() => { toast('LINE ID saved', 'ok'); reopen(); });
+    };
+    if ($('ch-log')) $('ch-log').onclick = async () => {
+      const ans = await inputModal({
+        title: 'Log a channel touch',
+        fields: [
+          { key: 'channel', label: 'channel', value: defChan, placeholder: 'whatsapp · zalo · line · phone', required: true },
+          { key: 'note', label: 'note', type: 'textarea', placeholder: 'optional' },
+        ],
+        confirmLabel: 'Log touch',
+      });
+      if (!ans) return;
+      req('POST', `/api/leads/${id}/touch`, { channel: ans.channel.toLowerCase(), note: ans.note || undefined })
+        .then(() => { toast('Touch logged', 'ok'); changed(); reopen(); });
+    };
     if ($('d-brief')) $('d-brief').onclick = () => {
       const b = $('d-brief');
       b.disabled = true;

@@ -9,6 +9,7 @@ import { parseLeadsCsv, toCsv } from '../lib/csv';
 import { normalizeDomain } from '../lib/crawler';
 import { removeDemoData, seedDemoData } from '../lib/demoData';
 import { buildBrief, DEFAULT_ICP } from '../lib/brief';
+import { DEFAULT_CHANNEL_TEMPLATES } from '../lib/channels';
 import { transitionDeal } from '../lib/dealMachine';
 import { findEmailForSite } from '../lib/crawler';
 import { createTaskOnce, markLeadReplied, resolvedTriage } from '../lib/pipelineHooks';
@@ -30,6 +31,8 @@ const PATCH_WHITELIST = new Set([
   'city',
   'category',
   'confirmed',
+  'preferred_channel',
+  'line_id',
 ]);
 
 export const api = new Hono<{ Bindings: Env }>();
@@ -485,6 +488,49 @@ api.post('/leads/:id/brief', async (c) => {
   const result = await buildBrief(c.env, lead, crawl.text, crawl.socials);
   if (!result) return c.json({ error: 'Brief generation failed — check the LLM key in Settings.' }, 400);
   return c.json({ ok: true, ...result });
+});
+
+/** Log a manual channel touch (WhatsApp/Zalo/Line/phone) — links only, never sends. */
+api.post('/leads/:id/touch', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const lead = await c.env.DB.prepare('SELECT id FROM leads WHERE id = ?').bind(id).first();
+  if (!lead) return c.json({ error: 'not found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as { channel?: string; note?: string };
+  const channel = String(body.channel ?? '');
+  if (!['whatsapp', 'zalo', 'line', 'phone'].includes(channel)) {
+    return c.json({ error: 'channel must be whatsapp, zalo, line or phone' }, 400);
+  }
+  await logActivity(c.env.DB, 'owner', 'channel_touch', id, {
+    channel,
+    direction: 'out',
+    ...(body.note?.trim() ? { note: body.note.trim().slice(0, 300) } : {}),
+  });
+  return c.json({ ok: true, channel });
+});
+
+/** Per-channel prefilled message templates (client-side fill, no LLM). */
+api.get('/config/channel-templates', async (c) => {
+  const stored = await c.env.KV.get('config:channel_templates');
+  let templates = DEFAULT_CHANNEL_TEMPLATES;
+  if (stored) {
+    try {
+      templates = { ...DEFAULT_CHANNEL_TEMPLATES, ...(JSON.parse(stored) as Record<string, string>) };
+    } catch {
+      /* fall back to defaults */
+    }
+  }
+  return c.json({ templates, source: stored ? 'dashboard' : 'default' });
+});
+api.put('/config/channel-templates', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { templates?: Record<string, string> };
+  const t = body.templates ?? {};
+  const clean: Record<string, string> = {};
+  for (const k of ['whatsapp', 'zalo', 'line'] as const) {
+    if (typeof t[k] === 'string' && t[k].trim()) clean[k] = t[k].trim().slice(0, 600);
+  }
+  await c.env.KV.put('config:channel_templates', JSON.stringify(clean));
+  await logActivity(c.env.DB, 'owner', 'channel_templates_updated', null, { channels: Object.keys(clean) });
+  return c.json({ ok: true });
 });
 
 /** ICP paragraph used for fit scoring — editable from Settings. */
