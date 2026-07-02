@@ -78,6 +78,29 @@ async function personalize(
   }
 }
 
+/**
+ * Preview what the sequence engine would send next for a lead — same template
+ * lookup and personalization, but no claim, no send, no logging.
+ */
+export async function previewNextEmail(
+  env: Env,
+  lead: Lead,
+): Promise<{ ok: true; step: number; subject: string; body: string; personalized: boolean } | { ok: false; reason: string }> {
+  if (!['verified', 'contacted'].includes(lead.status)) {
+    return { ok: false, reason: `lead status is '${lead.status}' — only verified/contacted leads are in the sequence` };
+  }
+  if (lead.sequence_step >= 3) return { ok: false, reason: 'sequence already completed (3/3 sent)' };
+  const step = lead.sequence_step + 1;
+  const template = await env.DB.prepare(
+    'SELECT * FROM templates WHERE sequence_step = ? AND active = 1 ORDER BY id LIMIT 1',
+  )
+    .bind(step)
+    .first<TemplateRow>();
+  if (!template) return { ok: false, reason: `no active template for step ${step}` };
+  const content = await personalize(env, lead, template);
+  return { ok: true, step, subject: content.subject, body: content.body, personalized: content.personalized };
+}
+
 /** Flag leads whose 3-step sequence ran dry: NEVER dropped, only flagged. */
 async function flagExhaustedLeads(env: Env): Promise<number> {
   const db = env.DB;

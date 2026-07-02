@@ -5,12 +5,15 @@ import { runCrmAgent } from '../agent/loop';
 import { markCallOutcome } from '../agent/tools';
 import { logActivity } from '../lib/activity';
 import { isManagedKey, listSettings, putSetting } from '../lib/config';
-import { gmailConfigured, gmailGetProfile } from '../lib/gmail';
+import { parseLeadsCsv, toCsv } from '../lib/csv';
+import { normalizeDomain } from '../lib/crawler';
+import { gmailConfigured, gmailGetProfile, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
 import { getHealth } from '../lib/health';
 import { getDailyCap, getSentToday, isSendingPaused, setSendingPaused } from '../lib/kvconf';
 import { llmProvider, llmText } from '../lib/llm';
 import { placesTextSearch } from '../lib/places';
 import { verifyLead } from '../lib/verify';
+import { previewNextEmail } from '../jobs/sequence';
 import { runScrape } from '../jobs/sourcing';
 
 const PATCH_WHITELIST = new Set([
@@ -55,6 +58,126 @@ api.get('/leads', async (c) => {
     .bind(...binds, limit, offset)
     .all<Lead>();
   return c.json({ leads: rows.results });
+});
+
+/** Manually add one lead. */
+api.post('/leads', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as Record<string, string> | null;
+  if (!body) return c.json({ error: 'invalid JSON body' }, 400);
+  const company = (body.company_name ?? '').trim();
+  const email = (body.email ?? '').trim().toLowerCase() || null;
+  if (!company && !email) return c.json({ error: 'company_name or email required' }, 400);
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return c.json({ error: 'invalid email' }, 400);
+  if (email) {
+    const dupe = await c.env.DB.prepare('SELECT id FROM leads WHERE email = ?').bind(email).first<{ id: number }>();
+    if (dupe) return c.json({ error: `email already on lead #${dupe.id}` }, 409);
+    const sup = await c.env.DB.prepare('SELECT reason FROM suppression WHERE email = ?').bind(email).first();
+    if (sup) return c.json({ error: 'email is on the suppression list' }, 409);
+  }
+  const country = (body.country ?? '').trim().toUpperCase() || null;
+  const inserted = await c.env.DB.prepare(
+    `INSERT INTO leads (company_name, contact_name, email, phone, website, domain, category, city, country, timezone, source, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?) RETURNING id`,
+  )
+    .bind(
+      company || (email ? email.split('@')[1] : 'Unknown'),
+      body.contact_name?.trim() || null,
+      email,
+      body.phone?.trim() || null,
+      body.website?.trim() || null,
+      normalizeDomain(body.website ?? null),
+      body.category?.trim() || null,
+      body.city?.trim() || null,
+      country,
+      country === 'VN' ? 'Asia/Ho_Chi_Minh' : 'Asia/Bangkok',
+      email ? 'enriched' : 'new',
+    )
+    .first<{ id: number }>();
+  const id = inserted!.id;
+  await logActivity(c.env.DB, 'owner', 'lead_created', id, { source: 'manual' });
+  // Verify inline so a manual lead is sendable right away.
+  if (email) {
+    const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
+    if (lead) await verifyLead(c.env, c.env.DB, lead).catch(() => null);
+  }
+  const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
+  return c.json({ ok: true, lead });
+});
+
+/** Import leads from pasted CSV. */
+api.post('/leads/import', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { csv?: string; verify?: boolean };
+  if (!body.csv) return c.json({ error: 'csv text required' }, 400);
+  const { rows, errors } = parseLeadsCsv(body.csv);
+  let imported = 0;
+  let skipped = 0;
+  const importedIds: number[] = [];
+  for (const row of rows) {
+    const domain = normalizeDomain(row.website);
+    if (row.email) {
+      const dupe = await c.env.DB.prepare('SELECT id FROM leads WHERE email = ?').bind(row.email).first();
+      const sup = await c.env.DB.prepare('SELECT email FROM suppression WHERE email = ?').bind(row.email).first();
+      if (dupe || sup) {
+        skipped++;
+        continue;
+      }
+    }
+    if (domain) {
+      const dupe = await c.env.DB.prepare('SELECT id FROM leads WHERE domain = ?').bind(domain).first();
+      if (dupe) {
+        skipped++;
+        continue;
+      }
+    }
+    const inserted = await c.env.DB.prepare(
+      `INSERT INTO leads (company_name, contact_name, email, phone, website, domain, category, city, country, timezone, source, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'import', ?) RETURNING id`,
+    )
+      .bind(
+        row.company_name,
+        row.contact_name,
+        row.email,
+        row.phone,
+        row.website,
+        domain,
+        row.category,
+        row.city,
+        row.country,
+        row.country === 'VN' ? 'Asia/Ho_Chi_Minh' : 'Asia/Bangkok',
+        row.email ? 'enriched' : 'new',
+      )
+      .first<{ id: number }>();
+    imported++;
+    importedIds.push(inserted!.id);
+  }
+  await logActivity(c.env.DB, 'owner', 'leads_imported', null, { imported, skipped, parse_errors: errors.length });
+  // Verify imported emails (default on) so they enter the sequence.
+  let verified = 0;
+  if (body.verify !== false) {
+    for (const id of importedIds.slice(0, 100)) {
+      const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
+      if (lead?.email) {
+        const r = await verifyLead(c.env, c.env.DB, lead).catch(() => null);
+        if (r?.ok) verified++;
+      }
+    }
+  }
+  return c.json({ ok: true, imported, skipped, verified, errors });
+});
+
+/** Export all leads as CSV. */
+api.get('/leads/export', async (c) => {
+  const rows = await c.env.DB.prepare('SELECT * FROM leads ORDER BY id').all<Lead>();
+  const headers = [
+    'id', 'company_name', 'contact_name', 'email', 'email_status', 'phone', 'phone_status', 'website',
+    'category', 'city', 'country', 'status', 'sequence_step', 'needs_call', 'next_action_at',
+    'last_contacted_at', 'drop_reason', 'notes', 'created_at',
+  ];
+  const csv = toCsv(headers, rows.results as unknown as Record<string, unknown>[]);
+  return c.body(csv, 200, {
+    'content-type': 'text/csv; charset=utf-8',
+    'content-disposition': `attachment; filename="maranasi-leads-${new Date().toISOString().slice(0, 10)}.csv"`,
+  });
 });
 
 api.get('/leads/:id', async (c) => {
@@ -107,6 +230,161 @@ api.post('/leads/:id/call-outcome', async (c) => {
   }
   const result = await markCallOutcome(c.env, id, body.outcome, 'owner');
   return c.json(result, 'error' in result ? 404 : 200);
+});
+
+/** Preview the next sequence email for a lead (no send, no state change). */
+api.get('/leads/:id/preview-next', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
+  if (!lead) return c.json({ error: 'not found' }, 404);
+  return c.json(await previewNextEmail(c.env, lead));
+});
+
+/** Pause / resume automated follow-ups for one lead (status unchanged). */
+api.post('/leads/:id/sequence/:action', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const action = c.req.param('action');
+  if (action !== 'pause' && action !== 'resume') return c.json({ error: 'action must be pause or resume' }, 400);
+  const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
+  if (!lead) return c.json({ error: 'not found' }, 404);
+  if (!['verified', 'contacted'].includes(lead.status)) {
+    return c.json({ error: `lead status is '${lead.status}' — only verified/contacted leads are in the sequence` }, 400);
+  }
+  if (action === 'resume' && lead.sequence_step >= 3) {
+    return c.json({ error: 'sequence already completed (3/3)' }, 400);
+  }
+  const next = action === 'pause' ? null : nowIso();
+  await c.env.DB.prepare('UPDATE leads SET next_action_at = ?, updated_at = ? WHERE id = ?')
+    .bind(next, nowIso(), id)
+    .run();
+  await logActivity(c.env.DB, 'owner', `sequence_${action}d`, id, { next_action_at: next });
+  return c.json({ ok: true, id, next_action_at: next });
+});
+
+/**
+ * Owner-composed manual email to a lead (e.g. replying to an interested
+ * lead). Owner-initiated, so it sends for real when Gmail is connected —
+ * DRY_RUN only gates the automated sequence. Threads into the existing
+ * conversation when one exists.
+ */
+api.post('/leads/:id/email', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
+  if (!lead) return c.json({ error: 'not found' }, 404);
+  if (!lead.email) return c.json({ error: 'lead has no email' }, 400);
+  const body = (await c.req.json().catch(() => ({}))) as { subject?: string; body?: string };
+  if (!body.subject?.trim() || !body.body?.trim()) return c.json({ error: 'subject and body required' }, 400);
+  const suppressed = await c.env.DB.prepare('SELECT reason FROM suppression WHERE email = ?')
+    .bind(lead.email.toLowerCase())
+    .first<{ reason: string }>();
+  if (suppressed) {
+    return c.json({ error: `this address is suppressed (${suppressed.reason}) — it opted out or bounced` }, 403);
+  }
+  if (!gmailConfigured(c.env)) return c.json({ error: 'Gmail is not connected — Settings → Connect Gmail' }, 400);
+
+  const prevOut = await c.env.DB.prepare(
+    'SELECT gmail_thread_id FROM email_log WHERE lead_id = ? AND gmail_thread_id IS NOT NULL AND dry_run = 0 ORDER BY id DESC LIMIT 1',
+  )
+    .bind(id)
+    .first<{ gmail_thread_id: string }>();
+  const threadId = prevOut?.gmail_thread_id ?? undefined;
+  const replyHeaders = threadId ? await gmailThreadReplyHeaders(c.env, threadId) : {};
+  const sent = await gmailSend(c.env, {
+    to: lead.email,
+    subject: body.subject.trim(),
+    body: body.body,
+    threadId,
+    ...replyHeaders,
+  });
+  await c.env.DB.prepare(
+    `INSERT INTO email_log (lead_id, direction, sequence_step, subject, body, gmail_message_id, gmail_thread_id, dry_run)
+     VALUES (?, 'out', NULL, ?, ?, ?, ?, 0)`,
+  )
+    .bind(id, body.subject.trim(), body.body, sent.id, sent.threadId)
+    .run();
+  await logActivity(c.env.DB, 'owner', 'manual_email_sent', id, { subject: body.subject.trim() });
+  return c.json({ ok: true, gmail_message_id: sent.id });
+});
+
+/** Aggregates for the Analytics tab. */
+api.get('/analytics', async (c) => {
+  const db = c.env.DB;
+  const funnelOrder = ['new', 'enriched', 'verified', 'contacted', 'interested'];
+  const byStatus = await db.prepare('SELECT status, COUNT(*) AS n FROM leads GROUP BY status').all<{ status: string; n: number }>();
+  const statusMap = Object.fromEntries(byStatus.results.map((r) => [r.status, r.n]));
+
+  const since30 = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const daily = await db
+    .prepare(
+      `SELECT date(created_at) AS d,
+              SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS sent,
+              SUM(CASE WHEN direction = 'in' AND COALESCE(classification,'') != 'bounce' THEN 1 ELSE 0 END) AS replies
+       FROM email_log WHERE date(created_at) >= ? GROUP BY d ORDER BY d`,
+    )
+    .bind(since30)
+    .all<{ d: string; sent: number; replies: number }>();
+
+  const totals = await db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS sent,
+         SUM(CASE WHEN direction = 'in' AND COALESCE(classification,'') NOT IN ('bounce','ooo') THEN 1 ELSE 0 END) AS replies,
+         SUM(CASE WHEN direction = 'in' AND classification = 'bounce' THEN 1 ELSE 0 END) AS bounces,
+         SUM(CASE WHEN direction = 'in' AND classification = 'interested' THEN 1 ELSE 0 END) AS interested
+       FROM email_log`,
+    )
+    .first<{ sent: number; replies: number; bounces: number; interested: number }>();
+
+  const byCountry = await db
+    .prepare(
+      `SELECT COALESCE(country, '??') AS country, COUNT(*) AS total,
+              SUM(CASE WHEN status = 'interested' THEN 1 ELSE 0 END) AS interested
+       FROM leads GROUP BY country ORDER BY total DESC LIMIT 8`,
+    )
+    .all<{ country: string; total: number; interested: number }>();
+
+  const sent = totals?.sent ?? 0;
+  return c.json({
+    funnel: funnelOrder.map((s) => ({ status: s, n: statusMap[s] ?? 0 })),
+    others: {
+      not_interested: statusMap.not_interested ?? 0,
+      unresponsive_email: statusMap.unresponsive_email ?? 0,
+      opted_out: statusMap.opted_out ?? 0,
+      invalid_email: statusMap.invalid_email ?? 0,
+      dropped: statusMap.dropped ?? 0,
+    },
+    daily: daily.results,
+    rates: {
+      sent,
+      replies: totals?.replies ?? 0,
+      bounces: totals?.bounces ?? 0,
+      interested: totals?.interested ?? 0,
+      reply_rate: sent ? Math.round(((totals?.replies ?? 0) / sent) * 1000) / 10 : 0,
+      bounce_rate: sent ? Math.round(((totals?.bounces ?? 0) / sent) * 1000) / 10 : 0,
+    },
+    by_country: byCountry.results,
+  });
+});
+
+/** Daily send cap control (KV override; empty resets to the env default). */
+api.get('/config/daily-cap', async (c) => {
+  const kv = await c.env.KV.get('config:daily_cap');
+  return c.json({ cap: await getDailyCap(c.env), source: kv ? 'dashboard' : 'default', default: parseInt(c.env.DAILY_SEND_CAP || '20', 10) });
+});
+
+api.put('/config/daily-cap', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { cap?: number | string | null };
+  const raw = body.cap;
+  if (raw === null || raw === '' || raw === undefined) {
+    await c.env.KV.delete('config:daily_cap');
+    await logActivity(c.env.DB, 'owner', 'daily_cap_reset', null, {});
+    return c.json({ ok: true, cap: await getDailyCap(c.env), source: 'default' });
+  }
+  const cap = parseInt(String(raw), 10);
+  if (Number.isNaN(cap) || cap < 0 || cap > 500) return c.json({ error: 'cap must be 0-500' }, 400);
+  await c.env.KV.put('config:daily_cap', String(cap));
+  await logActivity(c.env.DB, 'owner', 'daily_cap_set', null, { cap });
+  return c.json({ ok: true, cap, source: 'dashboard' });
 });
 
 api.post('/scrape/run', async (c) => {
