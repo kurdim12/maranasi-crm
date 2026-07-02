@@ -4,6 +4,7 @@ import { logActivity, logError } from '../lib/activity';
 import { llmText, parseJsonLoose } from '../lib/llm';
 import { GmailSendError, gmailConfigured, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
 import { getDailyCap, getSentToday, incrementSentToday, isSendingPaused } from '../lib/kvconf';
+import { createCallTask } from '../lib/pipelineHooks';
 import { assertTransition, type LeadStatus } from '../lib/stateMachine';
 import { isWithinSendWindow } from '../lib/time';
 import { PERSONALIZER_PROMPT } from '../prompts/personalizer';
@@ -128,6 +129,7 @@ async function flagExhaustedLeads(env: Env): Promise<number> {
       to: 'unresponsive_email',
       needs_call: 1,
     });
+    await createCallTask(db, lead).catch((e) => console.error('[call task hook]', e));
     count++;
   }
   return count;

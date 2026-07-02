@@ -8,6 +8,7 @@ import { isManagedKey, listSettings, putSetting } from '../lib/config';
 import { parseLeadsCsv, toCsv } from '../lib/csv';
 import { normalizeDomain } from '../lib/crawler';
 import { removeDemoData, seedDemoData } from '../lib/demoData';
+import { createTaskOnce } from '../lib/pipelineHooks';
 import { gmailConfigured, gmailGetProfile, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
 import { getHealth } from '../lib/health';
 import { getDailyCap, getSentToday, isSendingPaused, setSendingPaused } from '../lib/kvconf';
@@ -352,6 +353,84 @@ api.post('/demo/seed', async (c) => {
 api.post('/demo/remove', async (c) => {
   const counts = await removeDemoData(c.env.DB);
   return c.json({ ok: true, ...counts });
+});
+
+/** Everything the Today home screen needs, in one request. */
+api.get('/today', async (c) => {
+  const db = c.env.DB;
+  const needsReply = await db
+    .prepare(
+      `SELECT e.id AS email_id, e.lead_id, e.subject, substr(e.body,1,160) AS snippet, e.classification, e.created_at,
+              l.company_name, l.email AS lead_email, l.status AS lead_status
+       FROM email_log e JOIN leads l ON l.id = e.lead_id
+       WHERE e.direction = 'in' AND e.triage = 'needs_reply'
+         AND (e.snoozed_until IS NULL OR e.snoozed_until <= datetime('now'))
+       ORDER BY e.created_at DESC LIMIT 20`,
+    )
+    .all();
+  const callsDue = await db
+    .prepare(
+      `SELECT l.id, l.company_name, l.phone, l.city, l.country, l.status, l.updated_at,
+              (SELECT t.id FROM tasks t WHERE t.lead_id = l.id AND t.done_at IS NULL AND t.title LIKE 'Call %' LIMIT 1) AS task_id
+       FROM leads l WHERE l.needs_call = 1 ORDER BY l.updated_at DESC LIMIT 20`,
+    )
+    .all();
+  const tasks = await db
+    .prepare(
+      `SELECT t.id, t.lead_id, t.deal_id, t.title, t.due_at, t.source, t.created_at, l.company_name
+       FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
+       WHERE t.done_at IS NULL ORDER BY t.due_at IS NULL, t.due_at ASC, t.id DESC LIMIT 30`,
+    )
+    .all();
+  const hotLeads = await db
+    .prepare(
+      `SELECT id, company_name, city, country, status, fit_score, updated_at
+       FROM leads WHERE fit_score >= 4 AND status NOT IN ('dropped','opted_out','not_interested')
+       ORDER BY updated_at DESC LIMIT 10`,
+    )
+    .all();
+  const pipeline = await db
+    .prepare(
+      `SELECT COUNT(*) AS open_deals, COALESCE(SUM(value_usd), 0) AS open_value
+       FROM deals WHERE stage NOT IN ('won','lost')`,
+    )
+    .first<{ open_deals: number; open_value: number }>();
+  return c.json({
+    needs_reply: needsReply.results,
+    calls_due: callsDue.results,
+    tasks: tasks.results,
+    hot_leads: hotLeads.results,
+    pipeline,
+  });
+});
+
+/** Tasks: quick-add and complete. */
+api.get('/tasks', async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT t.*, l.company_name FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
+     WHERE t.done_at IS NULL ORDER BY t.due_at IS NULL, t.due_at ASC LIMIT 100`,
+  ).all();
+  return c.json({ tasks: rows.results });
+});
+
+api.post('/tasks', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { title?: string; lead_id?: number; due_at?: string };
+  const title = body.title?.trim();
+  if (!title) return c.json({ error: 'title required' }, 400);
+  const id = await createTaskOnce(c.env.DB, body.lead_id ?? null, null, title, 'manual', body.due_at ?? null);
+  if (!id) return c.json({ error: 'an identical open task already exists for that lead' }, 409);
+  return c.json({ ok: true, id });
+});
+
+api.post('/tasks/:id/done', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const res = await c.env.DB.prepare("UPDATE tasks SET done_at = datetime('now') WHERE id = ? AND done_at IS NULL")
+    .bind(id)
+    .run();
+  if (!res.meta.changes) return c.json({ error: 'task not found or already done' }, 404);
+  const task = await c.env.DB.prepare('SELECT lead_id, title FROM tasks WHERE id = ?').bind(id).first<{ lead_id: number | null; title: string }>();
+  await logActivity(c.env.DB, 'owner', 'task_completed', task?.lead_id ?? null, { task_id: id, title: task?.title });
+  return c.json({ ok: true });
 });
 
 /** Aggregates for the Analytics tab. */

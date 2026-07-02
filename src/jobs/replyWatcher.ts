@@ -12,6 +12,7 @@ import {
   type ParsedMessage,
 } from '../lib/gmail';
 import { isSendingPaused, setSendingPaused } from '../lib/kvconf';
+import { ensureDealForInterested, triageForInbound } from '../lib/pipelineHooks';
 import { transitionLead, type LeadStatus } from '../lib/stateMachine';
 import { CLASSIFIER_PROMPT } from '../prompts/classifier';
 
@@ -124,6 +125,8 @@ async function applyClassification(
           detail: { via: 'reply', summary: cls.summary },
         });
       }
+      // Post-reply loop: an interested lead always has an open deal + a task.
+      await ensureDealForInterested(db, lead).catch((e) => console.error('[deal hook]', e));
       // Immediate owner notification — this is owner-facing, sends for real.
       const notified = await sendOwnerEmail(
         env,
@@ -262,10 +265,10 @@ export async function runReplyWatcher(env: Env): Promise<WatcherStats> {
       // dedupe key, so a failing side effect can never lose the reply.
       await db
         .prepare(
-          `INSERT INTO email_log (lead_id, direction, subject, body, gmail_message_id, gmail_thread_id, classification, dry_run)
-           VALUES (?, 'in', ?, ?, ?, ?, ?, 0)`,
+          `INSERT INTO email_log (lead_id, direction, subject, body, gmail_message_id, gmail_thread_id, classification, dry_run, triage)
+           VALUES (?, 'in', ?, ?, ?, ?, ?, 0, ?)`,
         )
-        .bind(lead.id, msg.subject, msg.bodyText.slice(0, 20000), msg.id, msg.threadId, cls.label)
+        .bind(lead.id, msg.subject, msg.bodyText.slice(0, 20000), msg.id, msg.threadId, cls.label, triageForInbound(cls.label))
         .run();
       await logActivity(db, 'system', 'reply_received', lead.id, {
         classification: cls.label,
