@@ -10,7 +10,7 @@
   --line2: rgba(255, 255, 255, 0.12);
   --t1: #ecedee;
   --t2: #9ba1a8;
-  --t3: #6b7178;
+  --t3: #848d97; /* was #6b7178 — bumped for AA contrast on bg1 at small sizes */
   --hot: #f5a524;
   --hot-dim: #8a5f14;
   --ok: #3ecf8e;
@@ -568,10 +568,25 @@ tr:hover .rowactions { display: inline-flex; }
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 
+/* ---------- kanban drag affordance ---------- */
+#board .cards.dragover { outline: 2px dashed var(--info); outline-offset: -4px; border-radius: var(--r1); background: rgba(91, 157, 217, 0.05); }
+.deal-card { cursor: grab; }
+.deal-card:active { cursor: grabbing; }
+
+/* ---------- timeline (drawer) ---------- */
+.tl-day { font: 600 10.5px var(--font-ui); text-transform: uppercase; letter-spacing: 0.07em; color: var(--t3); margin: 14px 0 6px 4px; }
+.tl-item { display: flex; gap: 10px; border-left: none; padding: 0 0 12px; margin-left: 0; }
+.tl-ico { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--bg2); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--t2); margin-top: 1px; }
+.tl-body { flex: 1; min-width: 0; }
+
 /* ---------- phone ---------- */
 @media (max-width: 900px) {
   :root { --row-h: 48px; }
-  header.top { padding: 8px 10px; flex-wrap: wrap; }
+  header.top { padding: 8px 10px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  /* Phone header stays one row: secondary actions live in tabs/palette. */
+  #btn-refresh, #btn-passwd, #btn-scrape, #b-user { display: none; }
+  header.top .brand span { display: none; } /* "MARANASI" alone on phones */
+  header.top button { padding: 6px 9px; flex: none; }
   nav.tabs { display: none; }
   main#view { padding: 10px 10px 84px; }
   #bottombar { display: flex; }

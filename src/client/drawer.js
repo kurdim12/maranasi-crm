@@ -4,6 +4,10 @@ import {
   openDrawerHost, closeDrawer, emptyHtml, inputModal, confirmModal,
 } from './core.js';
 
+function fmtTime(s) {
+  return s ? String(s).slice(11, 16) : '';
+}
+
 // Other views can subscribe to refresh after drawer mutations.
 let refreshHooks = [];
 export function onLeadChange(fn) { refreshHooks.push(fn); }
@@ -87,7 +91,7 @@ export function openLead(id) {
         <div class="frow"><label>stage</label>${
           terminal
             ? `<span class="mono">${esc(deal.stage)}${deal.lost_reason ? ` — ${esc(deal.lost_reason)}` : ''}</span>`
-            : `<select id="dl-stage">${STAGES.map((s) => `<option value="${s}"${s === deal.stage ? ' selected' : ''}>${s.replace(/_/g, ' ')}</option>`).join('')}</select>`
+            : `<select id="dl-stage" aria-label="Deal stage">${STAGES.map((s) => `<option value="${s}"${s === deal.stage ? ' selected' : ''}>${s.replace(/_/g, ' ')}</option>`).join('')}</select>`
         }</div>
         <div class="frow"><label>value USD</label><input id="dl-value" class="mono" value="${deal.value_usd ?? ''}" ${terminal ? 'disabled' : ''}></div>
         <div class="frow"><label>expected close</label><input id="dl-close" class="mono" placeholder="YYYY-MM-DD" value="${esc(deal.expected_close ? String(deal.expected_close).slice(0, 10) : '')}" ${terminal ? 'disabled' : ''}></div>
@@ -112,30 +116,47 @@ export function openLead(id) {
       </div>`;
     }
 
+    const ACT_ICONS = {
+      call_outcome: '☎', lead_dropped: '✕', status_change: '→', task_created: '＋', task_completed: '✓',
+      deal_created: '◆', deal_stage_changed: '◆', reply_received: '↓', brief_built: '✦',
+      suppression_added: '⃠', manual_email_sent: '↑', channel_touch: '#',
+    };
     const items = [];
     (data.emails || []).forEach((e) => {
       items.push({
         at: e.created_at,
-        html: `<div class="tl-item"><div class="meta">${esc(e.created_at)} · ${
-          e.direction === 'out' ? '↑ sent' : '↓ received'
-        }${e.sequence_step ? ` · step ${e.sequence_step}` : e.direction === 'out' ? ' · manual' : ''}${
-          e.classification ? ` · ${esc(e.classification)}` : ''
-        }${e.dry_run ? ' · DRY RUN' : ''}</div><b>${esc(e.subject || '(no subject)')}</b><pre>${
-          esc((e.body || '').slice(0, 1500))
-        }</pre></div>`,
+        html: `<div class="tl-item"><div class="tl-ico" aria-hidden="true">${e.direction === 'out' ? '↑' : '↓'}</div>
+          <div class="tl-body"><div class="meta">${esc(fmtTime(e.created_at))} · ${
+            e.direction === 'out' ? 'sent' : 'received'
+          }${e.sequence_step ? ` · step ${e.sequence_step}` : e.direction === 'out' ? ' · manual' : ''}${
+            e.classification ? ` · ${esc(e.classification)}` : ''
+          }${e.dry_run ? ' · DRY RUN' : ''}</div><b>${esc(e.subject || '(no subject)')}</b><pre>${
+            esc((e.body || '').slice(0, 1500))
+          }</pre></div></div>`,
       });
     });
     (data.activities || []).forEach((a) => {
       items.push({
         at: a.created_at,
-        html: `<div class="tl-item"><div class="meta">${esc(a.created_at)} · ${esc(a.actor)} · <b>${
-          esc(a.action)
-        }</b></div>${a.detail ? `<pre>${esc(a.detail)}</pre>` : ''}</div>`,
+        html: `<div class="tl-item"><div class="tl-ico" aria-hidden="true">${ACT_ICONS[a.action] || '·'}</div>
+          <div class="tl-body"><div class="meta">${esc(fmtTime(a.created_at))} · ${esc(a.actor)} · <b>${
+            esc(a.action.replace(/_/g, ' '))
+          }</b></div>${a.detail ? `<pre>${esc(a.detail)}</pre>` : ''}</div></div>`,
       });
     });
     items.sort((a, b) => (a.at < b.at ? 1 : -1));
+    let timeline = '';
+    let lastDay = '';
+    for (const it of items) {
+      const day = String(it.at || '').slice(0, 10);
+      if (day !== lastDay) {
+        lastDay = day;
+        timeline += `<div class="tl-day">${esc(day)}</div>`;
+      }
+      timeline += it.html;
+    }
     h += `<div class="sect"><h3>Timeline (${items.length})</h3>${
-      items.length ? items.map((i) => i.html).join('') : emptyHtml('Nothing yet — the first send or call lands here.')
+      items.length ? timeline : emptyHtml('Nothing yet — the first send or call lands here.')
     }</div>`;
 
     $('drawer').innerHTML = h;

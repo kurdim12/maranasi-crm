@@ -63,10 +63,10 @@ export function render(root) {
     (v) => { view = v; loadLeads(false); },
   ));
   filters.insertAdjacentHTML('beforeend', `
-    <select id="f-status"><option value="">status: all</option>${
+    <select id="f-status" aria-label="Filter by status"><option value="">status: all</option>${
       STATUS_OPTIONS.map((s) => `<option>${s}</option>`).join('')
     }</select>
-    <select id="f-country"><option value="">country: all</option><option>VN</option><option>TH</option></select>
+    <select id="f-country" aria-label="Filter by country"><option value="">country: all</option><option>VN</option><option>TH</option></select>
     <label style="display:flex;align-items:center;gap:5px;color:var(--t2)"><input type="checkbox" id="f-needs-call"> needs call</label>
     <input type="text" id="f-q" placeholder="Search…">
     <span class="grow"></span>

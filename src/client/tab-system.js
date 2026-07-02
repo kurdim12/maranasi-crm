@@ -140,7 +140,7 @@ function renderSuppression() {
     const rows = data.suppression || [];
     let h = `<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
       <input type="text" id="sup-email" class="mono" placeholder="email@company.com" style="width:240px">
-      <select id="sup-reason">
+      <select id="sup-reason" aria-label="Suppression reason">
         <option value="manual">manual</option>
         <option value="not_interested">not_interested</option>
         <option value="opt_out">opt_out</option>

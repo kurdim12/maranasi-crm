@@ -108,9 +108,11 @@ function drawBoard(body) {
     });
   });
   body.querySelectorAll('.cards').forEach((col) => {
-    col.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+    col.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; col.classList.add('dragover'); });
+    col.addEventListener('dragleave', () => col.classList.remove('dragover'));
     col.addEventListener('drop', (e) => {
       e.preventDefault();
+      col.classList.remove('dragover');
       let payload;
       try { payload = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
       moveDeal(+payload.deal, payload.from, col.dataset.col);
@@ -129,7 +131,7 @@ function drawList(body) {
       <td class="num">${d.expected_close ? esc(String(d.expected_close).slice(0, 10)) : '—'}</td>
       <td>${esc(d.next_step || '—')}</td>
       <td class="num">${esc(fmtDate(d.updated_at))}</td>
-      <td><select class="stage-sel" data-deal="${d.id}" data-stage="${esc(d.stage)}" onclick="event.stopPropagation()">
+      <td><select class="stage-sel" aria-label="Deal stage" data-deal="${d.id}" data-stage="${esc(d.stage)}" onclick="event.stopPropagation()">
         ${STAGES.map((s) => `<option value="${s.key}"${s.key === d.stage ? ' selected' : ''}>${s.label}</option>`).join('')}
       </select></td>
     </tr>`).join('')}</tbody></table></div>`;

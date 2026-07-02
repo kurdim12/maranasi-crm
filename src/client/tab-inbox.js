@@ -51,7 +51,7 @@ function renderRail(counts) {
       <span>${esc(q.label)}</span>${n ? `<span class="cnt mono">${n}</span>` : ''}</button>`;
   }).join('') +
     `<div class="rail-sep"></div>
-     <select id="ib-kind">
+     <select id="ib-kind" aria-label="Real or test mail">
        <option value="">real + test</option>
        <option value="real"${kind === 'real' ? ' selected' : ''}>real only</option>
        <option value="test"${kind === 'test' ? ' selected' : ''}>test (dry run)</option>

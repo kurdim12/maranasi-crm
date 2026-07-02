@@ -42,8 +42,8 @@ export const DASHBOARD_HTML = `<!doctype html>
     <button id="btn-scrape" class="ghost" title="Run lead sourcing now">▶ Scrape</button>
     <button id="btn-pause" class="danger" title="Pause all sending">⏸ Pause</button>
     <button id="btn-resume" class="good" style="display:none" title="Resume sending">▶ Resume</button>
-    <button id="btn-refresh" class="ghost" title="Refresh (or press g then tab key)">↻</button>
-    <button id="chat-toggle" class="ghost" title="CRM agent">✦</button>
+    <button id="btn-refresh" class="ghost" title="Refresh (or press g then tab key)" aria-label="Refresh">↻</button>
+    <button id="chat-toggle" class="ghost" title="CRM agent" aria-label="Toggle CRM agent chat">✦</button>
     <span class="chip" id="b-user"></span>
     <button id="btn-passwd" class="ghost" style="display:none" title="Change my password">Password</button>
     <button id="btn-logout" class="ghost">Sign out</button>
@@ -68,7 +68,7 @@ export const DASHBOARD_HTML = `<!doctype html>
     <button data-q="Show me pipeline stats.">Pipeline stats</button>
   </div>
   <div id="chat-form">
-    <textarea id="chat-text" placeholder="Ask the CRM agent… (Enter to send)"></textarea>
+    <textarea id="chat-text" placeholder="Ask the CRM agent… (Enter to send)" aria-label="Message the CRM agent"></textarea>
     <button class="primary" id="chat-send">Send</button>
   </div>
 </aside>
@@ -80,11 +80,11 @@ export const DASHBOARD_HTML = `<!doctype html>
 <div id="modal-wrap"><div id="modal"></div></div>
 
 <div id="palette-wrap"><div id="palette">
-  <input id="pal-input" type="text" placeholder="Search leads, jump, run an action…" autocomplete="off">
+  <input id="pal-input" type="text" placeholder="Search leads, jump, run an action…" autocomplete="off" aria-label="Command palette search">
   <div id="pal-list"></div>
 </div></div>
 
-<div id="toasts"></div>
+<div id="toasts" role="status" aria-live="polite"></div>
 
 <script type="module" src="/assets/app.js"></script>
 </body>
