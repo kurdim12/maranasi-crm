@@ -72,24 +72,53 @@ function pickBest(emails: string[], siteDomain: string): string | null {
   return roleSame ?? sameDomain[0] ?? usable[0] ?? null;
 }
 
+/** Visible-text extraction (rough but adequate for LLM briefs). */
+export function stripHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(nbsp|amp|quot|#39|lt|gt);/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const SOCIAL_RE = /https?:\/\/(?:www\.)?(instagram\.com|facebook\.com|linkedin\.com)\/[A-Za-z0-9_.\-/%]+/gi;
+
+export function extractSocials(html: string): Record<string, string> {
+  const socials: Record<string, string> = {};
+  for (const m of html.matchAll(SOCIAL_RE)) {
+    const url = m[0].replace(/[).,'"]+$/, '');
+    const host = m[1].toLowerCase();
+    const key = host.startsWith('instagram') ? 'instagram' : host.startsWith('facebook') ? 'facebook' : 'linkedin';
+    if (!socials[key] && !/\/(sharer|share|intent|plugins)\//.test(url)) socials[key] = url;
+  }
+  return socials;
+}
+
 export interface CrawlResult {
   email: string | null;
   pagesFetched: number;
+  /** Visible text from the crawled pages, capped — brief-building input. */
+  text: string;
+  socials: Record<string, string>;
 }
 
 export async function findEmailForSite(website: string): Promise<CrawlResult> {
   const domain = normalizeDomain(website);
-  if (!domain) return { email: null, pagesFetched: 0 };
+  if (!domain) return { email: null, pagesFetched: 0, text: '', socials: {} };
 
   let base: string;
   try {
     const u = new URL(website.includes('://') ? website : `https://${website}`);
     base = `${u.protocol}//${u.hostname}`;
   } catch {
-    return { email: null, pagesFetched: 0 };
+    return { email: null, pagesFetched: 0, text: '', socials: {} };
   }
 
   const collected: string[] = [];
+  const textParts: string[] = [];
+  let socials: Record<string, string> = {};
   let pagesFetched = 0;
   for (const path of PATHS) {
     if (pagesFetched >= 5) break;
@@ -98,11 +127,13 @@ export async function findEmailForSite(website: string): Promise<CrawlResult> {
     pagesFetched++;
     if (!html) continue;
     collected.push(...extractEmails(html));
+    socials = { ...extractSocials(html), ...socials };
+    if (textParts.join(' ').length < 12_000) textParts.push(stripHtml(html).slice(0, 6000));
     // stop early once a same-domain role email is on hand
     const best = pickBest(collected, domain);
     if (best && ROLE_PREFIXES.includes(best.split('@')[0]) && best.split('@')[1].includes(domain)) {
-      return { email: best, pagesFetched };
+      return { email: best, pagesFetched, text: textParts.join('\n\n').slice(0, 14_000), socials };
     }
   }
-  return { email: pickBest(collected, domain), pagesFetched };
+  return { email: pickBest(collected, domain), pagesFetched, text: textParts.join('\n\n').slice(0, 14_000), socials };
 }

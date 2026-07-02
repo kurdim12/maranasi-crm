@@ -50,6 +50,13 @@ async function personalize(
     personalized: false,
   };
   try {
+    // The P4 brief gives the personalizer a text-grounded hook to work with.
+    let brief: Record<string, unknown> | null = null;
+    try {
+      brief = lead.brief ? (JSON.parse(lead.brief) as Record<string, unknown>) : null;
+    } catch {
+      brief = null;
+    }
     const raw = await llmText(
       env,
       'fast',
@@ -64,6 +71,15 @@ async function personalize(
           contact_name: lead.contact_name,
           website: lead.website,
         },
+        ...(brief
+          ? {
+              company_brief: {
+                what_they_do: brief.what_they_do,
+                event_types: brief.event_types,
+                hook_angle: brief.hook_angle,
+              },
+            }
+          : {}),
       }),
       1024,
     );
@@ -165,7 +181,7 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
          AND l.next_action_at IS NOT NULL AND l.next_action_at <= ?
          AND l.email NOT IN (SELECT email FROM suppression)
          AND l.source != 'demo'
-       ORDER BY l.next_action_at ASC
+       ORDER BY COALESCE(l.fit_score, 0) DESC, l.next_action_at ASC
        LIMIT 50`,
     )
     .bind(now)

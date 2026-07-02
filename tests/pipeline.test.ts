@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { normalizeBrief } from '../src/lib/brief';
+import { extractSocials, stripHtml } from '../src/lib/crawler';
 import { assertDealTransition, DEAL_STAGES, IllegalDealTransition } from '../src/lib/dealMachine';
 import { resolvedTriage, triageForInbound } from '../src/lib/pipelineHooks';
 
@@ -43,5 +45,36 @@ describe('inbox triage defaults', () => {
     expect(resolvedTriage('out')).toBe('waiting');
     expect(resolvedTriage('in')).toBe('done');
     expect(resolvedTriage(null)).toBe('done');
+  });
+});
+
+describe('lead intelligence (P4)', () => {
+  it('normalizeBrief clamps and validates model output', () => {
+    const { brief, fit_score } = normalizeBrief({
+      what_they_do: 'x'.repeat(1000),
+      event_types: ['weddings', 42, '  ', 'expos'],
+      size_signals: null,
+      hook_angle: 'They run the Hanoi bridal fair.',
+      decision_makers: [{ name: 'Anh', title: 'Director' }, { title: 'no-name' }, 'junk'],
+      fit_score: 99,
+    });
+    expect(brief.what_they_do.length).toBe(400);
+    expect(brief.event_types).toEqual(['weddings', 'expos']);
+    expect(brief.size_signals).toEqual([]);
+    expect(brief.decision_makers).toEqual([{ name: 'Anh', title: 'Director' }]);
+    expect(fit_score).toBe(5);
+    expect(normalizeBrief({ fit_score: 0.4 }).fit_score).toBe(1);
+    expect(normalizeBrief({}).fit_score).toBeNull();
+  });
+
+  it('stripHtml and extractSocials pull usable signal from raw pages', () => {
+    const html = '<html><style>.x{}</style><body><h1>Lotus &amp; Co</h1><script>bad()</script>' +
+      '<a href="https://www.instagram.com/lotusevents">ig</a>' +
+      '<a href="https://facebook.com/sharer/share?u=x">share</a>' +
+      '<a href="https://www.facebook.com/lotusevents.vn">fb</a></body></html>';
+    expect(stripHtml(html)).toBe('Lotus Co ig share fb'); // scripts/styles gone, anchor text kept
+    const socials = extractSocials(html);
+    expect(socials.instagram).toBe('https://www.instagram.com/lotusevents');
+    expect(socials.facebook).toBe('https://www.facebook.com/lotusevents.vn');
   });
 });

@@ -285,7 +285,11 @@ function applyActivitySel() {
 function renderSettings() {
   const body = $('sys-body');
   body.innerHTML = skeletons(8);
-  Promise.all([req('GET', '/api/settings'), req('GET', '/api/config/daily-cap')]).then(([data, cap]) => {
+  Promise.all([
+    req('GET', '/api/settings'),
+    req('GET', '/api/config/daily-cap'),
+    req('GET', '/api/config/icp'),
+  ]).then(([data, cap, icp]) => {
     if (!$('sys-body')) return;
     let h = '';
 
@@ -300,6 +304,11 @@ function renderSettings() {
       <button class="primary" id="cap-save">Save cap</button>
       <button id="cap-reset">Reset to default (${esc(cap.default)})</button>
       <span class="placeholders">Go-live ramp: 10/day week 1 → 20 → 35 → 50. Never raise it faster than weekly.</span></div></div>`;
+
+    h += `<div class="tpl"><div class="top"><b>Ideal customer profile</b>${chip(icp.source)}</div>
+      <div class="placeholders" style="margin-bottom:8px">The AI scores every lead 1–5 against this paragraph (fit score). Sharpen it after your first scored batch.</div>
+      <textarea id="icp-in" rows="3">${esc(icp.icp)}</textarea>
+      <div class="foot"><button class="primary" id="icp-save">Save ICP</button><button id="icp-reset">Reset to default</button></div></div>`;
 
     h += `<div class="tpl"><div class="top"><b>Demo data</b>${chip('showcase', 'var(--violet)')}</div>
       <div class="placeholders" style="margin-bottom:10px">Fills every screen with 14 sample leads, mail threads and activity so you can explore the whole CRM. ` +
@@ -345,6 +354,18 @@ function renderSettings() {
       req('PUT', '/api/config/daily-cap', { cap: null }).then((r) => {
         toast(`Daily cap reset to ${r.cap}`, 'ok');
         loadStats();
+        renderSettings();
+      }).catch(() => {});
+    };
+    $('icp-save').onclick = () => {
+      req('PUT', '/api/config/icp', { icp: $('icp-in').value }).then(() => {
+        toast('ICP saved — new briefs score against it', 'ok');
+        renderSettings();
+      }).catch(() => {});
+    };
+    $('icp-reset').onclick = () => {
+      req('PUT', '/api/config/icp', { icp: '' }).then(() => {
+        toast('ICP reset to default', 'ok');
         renderSettings();
       }).catch(() => {});
     };

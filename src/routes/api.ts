@@ -8,7 +8,9 @@ import { isManagedKey, listSettings, putSetting } from '../lib/config';
 import { parseLeadsCsv, toCsv } from '../lib/csv';
 import { normalizeDomain } from '../lib/crawler';
 import { removeDemoData, seedDemoData } from '../lib/demoData';
+import { buildBrief, DEFAULT_ICP } from '../lib/brief';
 import { transitionDeal } from '../lib/dealMachine';
+import { findEmailForSite } from '../lib/crawler';
 import { createTaskOnce, markLeadReplied, resolvedTriage } from '../lib/pipelineHooks';
 import { manualSendGuard } from '../lib/sendGuards';
 import { gmailConfigured, gmailGetProfile, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
@@ -468,6 +470,40 @@ api.post('/leads/:id/draft', async (c) => {
   if (draft === null) return c.json({ error: 'no LLM provider configured — add OPENROUTER_API_KEY in Settings' }, 400);
   await logActivity(c.env.DB, 'owner', 'reply_drafted', id, { tone: body.tone ?? 'warm' });
   return c.json({ ok: true, draft });
+});
+
+/** Rebuild a lead's AI brief on demand (re-crawls the website). */
+api.post('/leads/:id/brief', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
+  if (!lead) return c.json({ error: 'not found' }, 404);
+  if (!lead.website) return c.json({ error: 'This lead has no website to analyze — add one first.' }, 400);
+  const crawl = await findEmailForSite(lead.website);
+  if (!crawl.text || crawl.text.length < 80) {
+    return c.json({ error: 'Could not read enough of the website to build a brief.' }, 400);
+  }
+  const result = await buildBrief(c.env, lead, crawl.text, crawl.socials);
+  if (!result) return c.json({ error: 'Brief generation failed — check the LLM key in Settings.' }, 400);
+  return c.json({ ok: true, ...result });
+});
+
+/** ICP paragraph used for fit scoring — editable from Settings. */
+api.get('/config/icp', async (c) => {
+  const stored = await c.env.KV.get('config:icp');
+  return c.json({ icp: stored?.trim() || DEFAULT_ICP, source: stored ? 'dashboard' : 'default' });
+});
+api.put('/config/icp', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { icp?: string };
+  const text = body.icp?.trim();
+  if (!text) {
+    await c.env.KV.delete('config:icp');
+    await logActivity(c.env.DB, 'owner', 'icp_reset', null, {});
+    return c.json({ ok: true, icp: DEFAULT_ICP, source: 'default' });
+  }
+  if (text.length > 1000) return c.json({ error: 'keep the ICP under 1000 characters' }, 400);
+  await c.env.KV.put('config:icp', text);
+  await logActivity(c.env.DB, 'owner', 'icp_updated', null, {});
+  return c.json({ ok: true, icp: text, source: 'dashboard' });
 });
 
 /** Pipeline: deals grouped by stage with per-column totals. */

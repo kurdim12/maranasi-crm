@@ -296,6 +296,67 @@ export async function seedDemoData(db: D1Database): Promise<DemoCounts | { error
     )
     .run();
 
+  // Intelligence showcase (P4): briefs + fit scores on the leads people click first.
+  const DEMO_BRIEFS: Record<string, { fit: number; brief: Record<string, unknown>; socials?: Record<string, string> }> = {
+    'events@lotusgrand.example.com': {
+      fit: 5,
+      brief: {
+        what_they_do: 'Operates Hanoi ballroom venues hosting corporate galas, product launches and weddings for up to 800 guests.',
+        event_types: ['corporate galas', 'product launches', 'weddings'],
+        size_signals: ['3 ballrooms', 'up to 800 guests'],
+        hook_angle: 'They list corporate galas as a core offering — pitch routing our Q4 gala clients to their ballrooms.',
+        decision_makers: [{ name: 'Tran Van Duc', title: 'Events Director' }],
+      },
+      socials: { instagram: 'https://www.instagram.com/example', facebook: 'https://www.facebook.com/example' },
+    },
+    'sales@bkkconventionhub.example.com': {
+      fit: 5,
+      brief: {
+        what_they_do: 'Bangkok convention center renting halls and organizing exhibition services for B2B trade shows.',
+        event_types: ['trade shows', 'conventions', 'sponsor activations'],
+        size_signals: ['12,000 sqm hall space'],
+        hook_angle: 'Their site promotes sponsor packages — propose a bundled activation package for regional brands.',
+        decision_makers: [{ name: 'Somsak Charoen', title: 'Sales Director' }],
+      },
+    },
+    'hello@rex-events.example.com': {
+      fit: 4,
+      brief: {
+        what_they_do: 'Ho Chi Minh City event agency producing corporate events for banking and FMCG clients.',
+        event_types: ['corporate events', 'brand activations'],
+        size_signals: ['banking clients'],
+        hook_angle: 'They serve banking clients with big activation budgets — offer overflow production capacity for Q4.',
+        decision_makers: [{ name: 'Nguyen Thi Mai', title: 'Managing Director' }],
+      },
+    },
+    'info@cmexpo.example.com': {
+      fit: 4,
+      brief: {
+        what_they_do: 'Chiang Mai exhibition center hosting regional expos and consumer fairs.',
+        event_types: ['exhibitions', 'consumer fairs'],
+        size_signals: [],
+        hook_angle: 'Their expo calendar shows recurring fairs — pitch sponsor experience production for the next season.',
+        decision_makers: [],
+      },
+    },
+    'book@saigonskyline.example.com': {
+      fit: 3,
+      brief: {
+        what_they_do: 'Rooftop venue in Ho Chi Minh City for private parties and small corporate receptions.',
+        event_types: ['receptions', 'private parties'],
+        size_signals: ['rooftop capacity 150'],
+        hook_angle: 'Small-format venue — position light staging and AV packages for corporate receptions.',
+        decision_makers: [{ name: 'Pham Quynh Anh', title: 'Venue Manager' }],
+      },
+    },
+  };
+  for (const [email, d] of Object.entries(DEMO_BRIEFS)) {
+    await db
+      .prepare("UPDATE leads SET brief = ?, fit_score = ?, socials = ? WHERE email = ? AND source = 'demo'")
+      .bind(JSON.stringify(d.brief), d.fit, d.socials ? JSON.stringify(d.socials) : null, email)
+      .run();
+  }
+
   await db
     .prepare("INSERT INTO activities (actor, action, lead_id, detail) VALUES ('owner', 'demo_seeded', NULL, ?)")
     .bind(JSON.stringify({ leads: LEADS.length, emails: EMAILS.length }))
@@ -311,6 +372,13 @@ export async function seedDemoData(db: D1Database): Promise<DemoCounts | { error
 }
 
 export async function removeDemoData(db: D1Database): Promise<DemoCounts> {
+  // Deals/tasks hang off demo leads (seeded or created while exploring) —
+  // they must go first or the leads delete trips FK constraints.
+  await db.prepare("DELETE FROM tasks WHERE lead_id IN (SELECT id FROM leads WHERE source = 'demo')").run();
+  await db
+    .prepare("DELETE FROM tasks WHERE deal_id IN (SELECT d.id FROM deals d JOIN leads l ON l.id = d.lead_id WHERE l.source = 'demo')")
+    .run();
+  await db.prepare("DELETE FROM deals WHERE lead_id IN (SELECT id FROM leads WHERE source = 'demo')").run();
   const emails = await db
     .prepare("DELETE FROM email_log WHERE lead_id IN (SELECT id FROM leads WHERE source = 'demo')")
     .run();

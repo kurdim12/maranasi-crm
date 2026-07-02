@@ -1,6 +1,7 @@
 import type { Env, Lead } from '../env';
 import { nowIso } from '../env';
 import { logActivity, logError } from '../lib/activity';
+import { buildBrief } from '../lib/brief';
 import { findEmailForSite, normalizeDomain } from '../lib/crawler';
 import { placesTextSearch } from '../lib/places';
 import { transitionLead } from '../lib/stateMachine';
@@ -126,9 +127,15 @@ export async function runScrape(
           website: place.website,
         });
 
-        // Enrich: crawl the site for a contact email.
+        // Enrich: crawl the site for a contact email (+ text for the brief).
         if (place.website && domain) {
-          const { email } = await findEmailForSite(place.website);
+          const crawl = await findEmailForSite(place.website);
+          const { email } = crawl;
+          // Intelligence is best-effort and must never block enrichment.
+          {
+            const lead = await db.prepare('SELECT * FROM leads WHERE id = ?').bind(leadId).first<Lead>();
+            if (lead) await buildBrief(env, lead, crawl.text, crawl.socials);
+          }
           if (email) {
             const suppressed = await db.prepare('SELECT email FROM suppression WHERE email = ?').bind(email).first();
             const emailTaken = await db.prepare('SELECT id FROM leads WHERE email = ?').bind(email).first();

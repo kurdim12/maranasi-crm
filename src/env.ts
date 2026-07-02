@@ -49,6 +49,11 @@ export interface Lead {
   last_contacted_at: string | null;
   drop_reason: string | null;
   notes: string | null;
+  brief: string | null; // JSON Brief (src/lib/brief.ts)
+  fit_score: number | null; // 1..5 vs the ICP
+  socials: string | null; // JSON {instagram?, facebook?, linkedin?}
+  preferred_channel: string | null; // whatsapp | zalo | line | email
+  line_id: string | null;
   created_at: string;
   updated_at: string;
 }

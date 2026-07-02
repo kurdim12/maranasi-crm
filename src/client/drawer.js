@@ -53,6 +53,32 @@ export function openLead(id) {
     </div>
     <div class="hint-bar">Logging "no answer" is the human gate that later allows the agent to drop this lead.</div></div>`;
 
+    // ---- Intelligence (P4): brief, fit score, socials ----
+    let brief = null;
+    let socials = null;
+    try { brief = l.brief ? JSON.parse(l.brief) : null; } catch { brief = null; }
+    try { socials = l.socials ? JSON.parse(l.socials) : null; } catch { socials = null; }
+    h += `<div class="sect"><h3>Intelligence${
+      l.fit_score ? ` <span class="chip${l.fit_score >= 4 ? ' hot' : ''}" style="margin-left:6px">${
+        l.fit_score >= 4 ? '<i style="background:var(--hot)"></i>' : ''
+      }fit ${l.fit_score}/5</span>` : ''
+    }</h3>${
+      brief
+        ? `${brief.what_they_do ? `<p style="margin:0 0 8px;color:var(--t2)">${esc(brief.what_they_do)}</p>` : ''}
+           ${brief.hook_angle ? `<div class="frow"><label>hook</label><span style="color:var(--t1)">${esc(brief.hook_angle)}</span></div>` : ''}
+           ${brief.event_types && brief.event_types.length ? `<div class="frow"><label>event types</label><span class="mono" style="color:var(--t2)">${brief.event_types.map(esc).join(' · ')}</span></div>` : ''}
+           ${brief.size_signals && brief.size_signals.length ? `<div class="frow"><label>size signals</label><span class="mono" style="color:var(--t2)">${brief.size_signals.map(esc).join(' · ')}</span></div>` : ''}
+           ${brief.decision_makers && brief.decision_makers.length ? `<div class="frow"><label>people</label><span style="color:var(--t2)">${brief.decision_makers.map((d) => esc(`${d.name}${d.title ? ` (${d.title})` : ''}`)).join(', ')}</span></div>` : ''}`
+        : '<p style="margin:0 0 8px;color:var(--t3)">No brief yet — build one from the website.</p>'
+    }${
+      socials
+        ? `<div class="frow"><label>socials</label><span>${['instagram', 'facebook', 'linkedin']
+            .filter((k) => socials[k])
+            .map((k) => `<a href="${esc(socials[k])}" target="_blank" rel="noopener" style="margin-right:10px">${k}</a>`)
+            .join('')}</span></div>`
+        : ''
+    }<div class="actions"><button id="d-brief" class="ghost">${brief ? '↻ Rebuild brief' : '✦ Build brief'}</button></div></div>`;
+
     const deal = (data.deals || []).find((d) => d.stage !== 'won' && d.stage !== 'lost') || (data.deals || [])[0];
     if (deal) {
       const STAGES = ['new', 'call_scheduled', 'proposal_sent', 'negotiation', 'won', 'lost'];
@@ -137,6 +163,14 @@ export function openLead(id) {
     $('d-noanswer').onclick = () => logCall('unresponsive', 'Call: no answer');
     $('d-verify').onclick = () =>
       req('POST', `/api/leads/${id}/verify`).then((r) => { toast(`Verification: ${r.reason}`, r.ok ? 'ok' : 'err'); changed(); reopen(); });
+    if ($('d-brief')) $('d-brief').onclick = () => {
+      const b = $('d-brief');
+      b.disabled = true;
+      b.textContent = 'analyzing website…';
+      req('POST', `/api/leads/${id}/brief`)
+        .then(() => { toast('Brief built', 'ok'); changed(); reopen(); })
+        .catch(() => { b.disabled = false; b.textContent = '✦ Build brief'; });
+    };
     if ($('d-preview')) $('d-preview').onclick = () =>
       req('GET', `/api/leads/${id}/preview-next`).then((r) => {
         if (!r.ok) { toast(r.reason || 'No preview available', 'err'); return; }

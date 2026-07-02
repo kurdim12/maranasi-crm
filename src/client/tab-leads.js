@@ -40,6 +40,12 @@ const cols = [
   { key: 'contact_name', label: 'Contact', render: (r) => esc(r.contact_name || '—') },
   { key: 'city', label: 'Location', render: (r) => `${esc(r.city || '—')}${r.country ? ' · ' + esc(r.country) : ''}` },
   { key: 'status', label: 'Status', render: (r) => statusChip(r.status) },
+  {
+    key: 'fit_score', label: 'Fit', cls: 'num', sortable: true,
+    render: (r) => (r.fit_score
+      ? `<span style="${r.fit_score >= 4 ? 'color:var(--hot);font-weight:600' : ''}">${r.fit_score}/5</span>`
+      : '—'),
+  },
   { key: 'sequence_step', label: 'Step', cls: 'num', render: (r) => `${r.sequence_step}/3` },
   { key: 'email', label: 'Email', cls: 'mono', render: (r) => `<span title="${esc(r.email || '')}">${esc(r.email || '—')}</span>` },
   { key: 'phone_status', label: 'Phone', render: (r) => (r.needs_call ? chip('CALL', 'var(--hot)', 'hot') : esc(r.phone_status || '—')) },
