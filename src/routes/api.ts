@@ -231,6 +231,59 @@ api.delete('/suppression/:email', async (c) => {
   return c.json({ ok: true });
 });
 
+// ---- dashboard user accounts ----
+
+api.get('/users', async (c) => {
+  const rows = await c.env.DB.prepare(
+    'SELECT id, username, display_name, active, created_at, last_login_at FROM users ORDER BY id',
+  ).all();
+  return c.json({ users: rows.results });
+});
+
+api.post('/users', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as {
+    username?: string;
+    password?: string;
+    display_name?: string;
+  };
+  const username = (body.username ?? '').trim().toLowerCase();
+  if (!/^[a-z0-9_.-]{3,32}$/.test(username)) {
+    return c.json({ error: 'username must be 3-32 chars: letters, digits, _ . -' }, 400);
+  }
+  if (!body.password || body.password.length < 8) {
+    return c.json({ error: 'password must be at least 8 characters' }, 400);
+  }
+  const exists = await c.env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+  if (exists) return c.json({ error: 'username already taken' }, 409);
+  const { hashPassword } = await import('../lib/password');
+  const hash = await hashPassword(body.password);
+  await c.env.DB.prepare('INSERT INTO users (username, password_hash, display_name) VALUES (?, ?, ?)')
+    .bind(username, hash, body.display_name ?? null)
+    .run();
+  await logActivity(c.env.DB, 'owner', 'user_created', null, { username });
+  return c.json({ ok: true, username });
+});
+
+api.patch('/users/:username', async (c) => {
+  const username = c.req.param('username').toLowerCase();
+  const body = (await c.req.json().catch(() => ({}))) as { active?: number };
+  if (body.active !== 0 && body.active !== 1) return c.json({ error: 'active must be 0 or 1' }, 400);
+  if (body.active === 0) {
+    const others = await c.env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM users WHERE active = 1 AND username != ?',
+    )
+      .bind(username)
+      .first<{ n: number }>();
+    if (!others?.n) return c.json({ error: 'cannot deactivate the last active account' }, 400);
+  }
+  const res = await c.env.DB.prepare('UPDATE users SET active = ? WHERE username = ?')
+    .bind(body.active, username)
+    .run();
+  if (!res.meta.changes) return c.json({ error: 'not found' }, 404);
+  await logActivity(c.env.DB, 'owner', 'user_updated', null, { username, active: body.active });
+  return c.json({ ok: true });
+});
+
 // ---- recent activity feed ----
 
 api.get('/activities', async (c) => {

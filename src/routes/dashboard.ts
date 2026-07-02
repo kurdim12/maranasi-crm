@@ -41,6 +41,8 @@ export const DASHBOARD_HTML = `<!doctype html>
   #login input { width:100%; padding:9px 12px; margin-bottom:10px; }
   #login button { width:100%; padding:9px; }
   #login .err { color:var(--critical); margin:8px 0 0; min-height:18px; }
+  #login .alt { margin-top:12px; text-align:center; }
+  #login .alt a { color:var(--muted); font-size:12px; }
 
   /* ---- shell ---- */
   #app { display:none; height:100%; flex-direction:column; }
@@ -139,9 +141,18 @@ export const DASHBOARD_HTML = `<!doctype html>
 <div id="login">
   <div class="card">
     <h1>MARANASI <span style="color:var(--blue)">OUTREACH</span></h1>
-    <p>Enter the admin API key to continue.</p>
-    <input type="password" id="login-key" placeholder="Admin API key" autofocus>
-    <button class="primary" id="login-btn">Unlock</button>
+    <p>Sign in to continue.</p>
+    <div id="login-form">
+      <input type="text" id="login-user" placeholder="Username" autocomplete="username" autofocus>
+      <input type="password" id="login-pass" placeholder="Password" autocomplete="current-password">
+      <button class="primary" id="login-btn">Sign in</button>
+      <div class="alt"><a href="#" id="login-alt">Use the admin API key instead</a></div>
+    </div>
+    <div id="login-keyform" style="display:none">
+      <input type="password" id="login-key" placeholder="Admin API key">
+      <button class="primary" id="login-key-btn">Unlock</button>
+      <div class="alt"><a href="#" id="login-back">Back to username sign-in</a></div>
+    </div>
     <div class="err" id="login-err"></div>
   </div>
 </div>
@@ -156,6 +167,9 @@ export const DASHBOARD_HTML = `<!doctype html>
     <button id="btn-pause" class="danger">⏸ Pause sending</button>
     <button id="btn-resume" class="good" style="display:none">▶ Resume sending</button>
     <button id="btn-refresh">↻ Refresh</button>
+    <span class="badge" id="b-user" style="display:none"></span>
+    <button id="btn-passwd" style="display:none" title="Change my password">Change password</button>
+    <button id="btn-logout" style="display:none">Sign out</button>
   </header>
 
   <div id="kpis"></div>
@@ -192,6 +206,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 (function () {
   'use strict';
   var API_KEY = null;
+  var CURRENT_USER = null;
   var chatHistory = [];
   var tab = 'leads';
   var leadsOffset = 0;
@@ -223,12 +238,14 @@ export const DASHBOARD_HTML = `<!doctype html>
     return '<span class="tag" style="' + style + '"><i style="background:' + c + '"></i>' + esc(status) + '</span>';
   }
   function req(method, path, body) {
+    var headers = { 'content-type': 'application/json' };
+    if (API_KEY) headers['X-API-Key'] = API_KEY;
     return fetch(path, {
       method: method,
-      headers: { 'X-API-Key': API_KEY || '', 'content-type': 'application/json' },
+      headers: headers,
       body: body === undefined ? undefined : JSON.stringify(body)
     }).then(function (r) {
-      if (r.status === 401) { showLogin('Session key rejected — enter it again.'); throw new Error('unauthorized'); }
+      if (r.status === 401) { showLogin('Session expired — sign in again.'); throw new Error('unauthorized'); }
       return r.json().then(function (data) {
         if (!r.ok && data && data.error) { toast(data.error, true); throw new Error(data.error); }
         return data;
@@ -236,33 +253,96 @@ export const DASHBOARD_HTML = `<!doctype html>
     });
   }
 
-  // ---------- login ----------
+  // ---------- login / session ----------
   function showLogin(msg) {
     API_KEY = null;
+    CURRENT_USER = null;
     $('login').style.display = 'flex';
     $('app').style.display = 'none';
     $('login-err').textContent = msg || '';
+    $('login-pass').value = '';
     $('login-key').value = '';
-    $('login-key').focus();
+    $('login-user').focus();
+  }
+  function boot() {
+    $('login').style.display = 'none';
+    $('app').style.display = 'flex';
+    var isSession = CURRENT_USER && CURRENT_USER !== 'api-key';
+    $('b-user').style.display = CURRENT_USER ? '' : 'none';
+    $('b-user').textContent = CURRENT_USER === 'api-key' ? 'API key' : CURRENT_USER;
+    $('btn-passwd').style.display = isSession ? '' : 'none';
+    $('btn-logout').style.display = '';
+    refreshAll();
   }
   function tryLogin() {
-    var key = $('login-key').value.trim();
-    if (!key) return;
+    var u = $('login-user').value.trim();
+    var p = $('login-pass').value;
+    if (!u || !p) return;
     $('login-btn').disabled = true;
-    fetch('/api/stats', { headers: { 'X-API-Key': key } }).then(function (r) {
+    fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p })
+    }).then(function (r) {
+      return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+    }).then(function (res) {
       $('login-btn').disabled = false;
-      if (!r.ok) { $('login-err').textContent = 'Invalid key.'; return; }
-      API_KEY = key;
-      $('login').style.display = 'none';
-      $('app').style.display = 'flex';
-      refreshAll();
+      if (!res.ok) { $('login-err').textContent = res.d.error || 'Sign-in failed.'; return; }
+      CURRENT_USER = res.d.username;
+      boot();
     }).catch(function () {
       $('login-btn').disabled = false;
       $('login-err').textContent = 'Network error.';
     });
   }
+  function tryKeyLogin() {
+    var key = $('login-key').value.trim();
+    if (!key) return;
+    $('login-key-btn').disabled = true;
+    fetch('/api/stats', { headers: { 'X-API-Key': key } }).then(function (r) {
+      $('login-key-btn').disabled = false;
+      if (!r.ok) { $('login-err').textContent = 'Invalid key.'; return; }
+      API_KEY = key;
+      CURRENT_USER = 'api-key';
+      boot();
+    }).catch(function () {
+      $('login-key-btn').disabled = false;
+      $('login-err').textContent = 'Network error.';
+    });
+  }
   $('login-btn').addEventListener('click', tryLogin);
-  $('login-key').addEventListener('keydown', function (e) { if (e.key === 'Enter') tryLogin(); });
+  $('login-user').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('login-pass').focus(); });
+  $('login-pass').addEventListener('keydown', function (e) { if (e.key === 'Enter') tryLogin(); });
+  $('login-key-btn').addEventListener('click', tryKeyLogin);
+  $('login-key').addEventListener('keydown', function (e) { if (e.key === 'Enter') tryKeyLogin(); });
+  $('login-alt').addEventListener('click', function (e) {
+    e.preventDefault();
+    $('login-form').style.display = 'none';
+    $('login-keyform').style.display = '';
+    $('login-err').textContent = '';
+    $('login-key').focus();
+  });
+  $('login-back').addEventListener('click', function (e) {
+    e.preventDefault();
+    $('login-keyform').style.display = 'none';
+    $('login-form').style.display = '';
+    $('login-err').textContent = '';
+    $('login-user').focus();
+  });
+  $('btn-logout').addEventListener('click', function () {
+    fetch('/auth/logout', { method: 'POST' }).then(function () { showLogin('Signed out.'); });
+  });
+  $('btn-passwd').addEventListener('click', function () {
+    var cur = window.prompt('Current password'); if (!cur) return;
+    var nw = window.prompt('New password (min 8 characters)'); if (!nw) return;
+    fetch('/auth/password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ current_password: cur, new_password: nw })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      toast(d.ok ? 'Password changed' : (d.error || 'Failed'), !d.ok);
+    });
+  });
 
   // ---------- KPIs / header ----------
   function kpi(value, label, color) {
@@ -619,8 +699,10 @@ export const DASHBOARD_HTML = `<!doctype html>
     toast('Conversation cleared');
   });
 
-  // boot
-  showLogin('');
+  // boot: reuse an existing session cookie if there is one
+  fetch('/auth/me').then(function (r) { return r.ok ? r.json() : null; }).then(function (me) {
+    if (me && me.ok) { CURRENT_USER = me.username; boot(); } else showLogin('');
+  }).catch(function () { showLogin(''); });
 })();
 </script>
 </body>

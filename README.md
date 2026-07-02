@@ -56,14 +56,29 @@ npm run deploy                          # production (requires `wrangler login`)
 (`dry_run=1`) and the console instead of hitting Gmail. Only the owner flips
 it — see `GOLIVE.md` for the full go-live checklist.
 
+## Auth
+
+Two ways in:
+
+- **Username + password** (dashboard): `POST /auth/login` sets a 7-day
+  HttpOnly session cookie. Accounts live in the `users` table with
+  PBKDF2-SHA256 hashes; failed logins lock out for 15 min after 10 attempts.
+  Manage accounts via `GET/POST /api/users`, `PATCH /api/users/:username`
+  (`{active:0|1}`), change your own password via `POST /auth/password`
+  (or the header button). Generate a hash manually with
+  `node scripts/hash-password.mjs '<password>'`.
+- **`X-API-Key: <ADMIN_API_KEY>`** header (automation/scripts) — still works
+  on every `/api/*` route.
+
 ## API
 
-All `/api/*` routes require header `X-API-Key: <ADMIN_API_KEY>`.
+All `/api/*` routes require a session cookie or the `X-API-Key` header.
 
 | Route | What |
 |---|---|
-| `GET /` | dashboard (prompts for the key once) |
+| `GET /` | dashboard (username/password sign-in; API key as fallback) |
 | `GET /health` | health check (public) |
+| `POST /auth/login` `/logout` | session login/logout; `GET /auth/me` = who am I |
 | `GET /api/leads` | list; filters: `status,country,city,needs_call,q,limit,offset` |
 | `GET /api/leads/:id` | lead + emails + activities |
 | `PATCH /api/leads/:id` | edit whitelisted fields |
