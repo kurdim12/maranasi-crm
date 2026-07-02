@@ -11,6 +11,13 @@ compatibility_flags = ["nodejs_compat"]
 [triggers]
 crons = ["*/15 * * * *"]
 
+# Client dashboard assets (src/client/**) are bundled as raw text and served
+# by src/routes/assets.ts — real .js/.css files, still zero build tooling.
+[[rules]]
+type = "Text"
+globs = ["**/client/**"]
+fallthrough = false
+
 [vars]
 DRY_RUN = "true"
 DAILY_SEND_CAP = "20"

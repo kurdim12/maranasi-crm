@@ -1,0 +1,130 @@
+// Analytics — pipeline funnel, outreach rates, daily send/reply chart, leads
+// by country. Ported 1:1 from v1's Analytics tab (renderAnalyticsTab / hbar /
+// dailyChart in dashboard.ts). Zero behavior change: same GET /api/analytics
+// payload ({ funnel, others, daily, rates, by_country }), same rows and math.
+// Nothing on this tab is "hot" — no amber anywhere, per the design system.
+import { $, esc, req, skeletons, emptyHtml } from './core.js';
+import { onLeadChange } from './drawer.js';
+
+export const id = 'analytics';
+export const title = 'Analytics';
+export const icon = '◫';
+export const hotkey = 'a';
+
+// Ordinal blue ramp for the ordered funnel steps, light -> dark (info-blue family).
+const RAMP = ['#8fb9e2', '#6fa8da', '#5b9dd9', '#4b83b6', '#3a6890'];
+
+export function render(root) {
+  root.innerHTML = `<div class="an-grid" id="an-grid">
+    <div class="card">${skeletons(6)}</div>
+    <div class="card">${skeletons(5)}</div>
+    <div class="card">${skeletons(4)}</div>
+    <div class="card">${skeletons(6)}</div>
+  </div>`;
+  load();
+}
+
+// Drawer edits can change a lead's status/country — refresh if we're mounted.
+onLeadChange(() => { if ($('an-grid')) load(); });
+
+function load() {
+  req('GET', '/api/analytics').then((a) => {
+    const grid = $('an-grid');
+    if (!grid) return; // tab changed while in flight
+    grid.innerHTML = funnelCard(a) + ratesCard(a) + dailyCard(a) + countryCard(a);
+  }).catch(() => {});
+}
+
+function hbar(label, value, max, color) {
+  const pct = max > 0 ? Math.max(2, Math.round((value / max) * 100)) : 2;
+  return `<div class="bar-row"><div class="lbl">${esc(label)}</div>
+    <div class="track"><div class="bar" style="width:${pct}%;background:${color}" title="${esc(label)}: ${value}"></div>
+    <span class="val num">${value}</span></div></div>`;
+}
+
+function funnelCard(a) {
+  const funnel = a.funnel || [];
+  const maxF = Math.max(...funnel.map((f) => f.n), 1);
+  const bars = funnel.map((f, i) => hbar(f.status, f.n, maxF, RAMP[i] || RAMP[4])).join('');
+  const others = a.others || {};
+  const otherTotal = Object.keys(others).reduce((s, k) => s + others[k], 0);
+  const exited = Object.keys(others)
+    .map((k) => `${esc(k)} <span class="num">${others[k]}</span>`)
+    .join(' · ');
+  return `<div class="card">
+    <div class="cardtop"><b>Pipeline funnel</b></div>
+    ${bars}
+    <div class="hint" style="margin-top:8px">exited: ${exited} (<span class="num">${otherTotal}</span> total)</div>
+  </div>`;
+}
+
+function ratesCard(a) {
+  const r = a.rates || {};
+  const bounceRate = r.bounce_rate || 0;
+  return `<div class="card">
+    <div class="cardtop"><b>Outreach performance (all time)</b></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px">
+      <div class="kpi"><div class="v num">${r.sent || 0}</div><div class="l">emails sent</div></div>
+      <div class="kpi"><div class="v num">${r.replies || 0}</div><div class="l">real replies</div></div>
+      <div class="kpi"><div class="v num">${r.reply_rate || 0}%</div><div class="l"><i style="background:var(--ok)"></i>reply rate</div></div>
+      <div class="kpi"><div class="v num">${bounceRate}%</div><div class="l"><i style="background:${bounceRate > 3 ? 'var(--warn)' : 'var(--ok)'}"></i>bounce rate</div></div>
+      <div class="kpi"><div class="v num">${r.interested || 0}</div><div class="l"><i style="background:var(--ok)"></i>interested</div></div>
+    </div>
+    <div class="hint" style="margin-top:8px">Bounce rate above 3% auto-pauses sending.</div>
+  </div>`;
+}
+
+function dailyCard(a) {
+  return `<div class="card">
+    <div class="cardtop"><b>Last 30 days — sent vs replies</b></div>
+    <div class="legend"><span><i style="background:var(--info)"></i>sent</span><span><i style="background:var(--ok)"></i>replies</span></div>
+    ${dailyChart(a.daily || [])}
+  </div>`;
+}
+
+function dailyChart(daily) {
+  if (!daily.length) return emptyHtml('No email activity yet.');
+  // Fill the last 30 days so gaps render as zero.
+  const byDay = {};
+  daily.forEach((d) => { byDay[d.d] = d; });
+  const days = [];
+  for (let i = 29; i >= 0; i--) {
+    const dt = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    const row = byDay[dt] || { sent: 0, replies: 0 };
+    days.push({ d: dt, sent: row.sent || 0, replies: row.replies || 0 });
+  }
+  const W = 640, H = 150, PAD = 6;
+  const max = Math.max(...days.map((x) => Math.max(x.sent, x.replies)), 1);
+  const bw = (W - PAD * 2) / days.length;
+  let svg = `<svg viewBox="0 0 ${W} ${H + 22}" style="width:100%;height:auto" role="img" aria-label="sent vs replies per day, last 30 days">`;
+  // Recessive gridlines at 0%, 50%, 100%.
+  [0, 0.5, 1].forEach((g) => {
+    const y = H - g * (H - 10);
+    svg += `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="var(--line2)" stroke-width="1"/>`;
+    svg += `<text x="2" y="${y - 3}" fill="var(--t3)" font-size="9">${Math.round(g * max)}</text>`;
+  });
+  days.forEach((x, i) => {
+    const cx = PAD + i * bw;
+    const hS = Math.round((x.sent / max) * (H - 10));
+    const hR = Math.round((x.replies / max) * (H - 10));
+    const w = Math.max(3, bw * 0.36);
+    svg += `<rect x="${cx}" y="${H - hS}" width="${w}" height="${hS}" rx="1.5" fill="var(--info)"><title>${esc(x.d)} — sent ${x.sent}</title></rect>`;
+    svg += `<rect x="${cx + w + 1.5}" y="${H - hR}" width="${w}" height="${hR}" rx="1.5" fill="var(--ok)"><title>${esc(x.d)} — replies ${x.replies}</title></rect>`;
+    if (i % 7 === 0) svg += `<text x="${cx}" y="${H + 14}" fill="var(--t3)" font-size="9">${esc(x.d.slice(5))}</text>`;
+  });
+  svg += '</svg>';
+  return svg;
+}
+
+function countryCard(a) {
+  const byCountry = a.by_country || [];
+  const maxC = Math.max(...byCountry.map((x) => x.total), 1);
+  const bars = byCountry
+    .map((x) => hbar(x.country + (x.interested ? ` (★${x.interested})` : ''), x.total, maxC, 'var(--ok)'))
+    .join('');
+  return `<div class="card">
+    <div class="cardtop"><b>Leads by country</b></div>
+    ${bars || emptyHtml('No leads yet.')}
+    ${byCountry.length ? '<div class="hint" style="margin-top:6px">★ = interested leads in that country</div>' : ''}
+  </div>`;
+}

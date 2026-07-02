@@ -4,6 +4,7 @@ import { dispatch } from './jobs/dispatcher';
 import { apiKeyAuth } from './lib/auth';
 import { withKvSecrets } from './lib/config';
 import { api } from './routes/api';
+import { assets } from './routes/assets';
 import { auth } from './routes/auth';
 import { dev } from './routes/dev';
 import { DASHBOARD_HTML } from './routes/dashboard';
@@ -14,6 +15,7 @@ const app = new Hono<{ Bindings: Env }>();
 // login/logout endpoints themselves.
 app.get('/health', (c) => c.json({ ok: true, service: 'maranasi-outreach-engine' }));
 app.get('/', (c) => c.html(DASHBOARD_HTML));
+app.route('/assets', assets);
 app.route('/auth', auth);
 
 // Everything under /api requires a session cookie (username/password login)
