@@ -1,5 +1,5 @@
 # Maranasi Outreach Engine — Cloudflare Worker
-name = "maranasi-outreach-engine"
+name = "maranasi-crm"
 main = "src/index.ts"
 compatibility_date = "2025-09-01"
 compatibility_flags = ["nodejs_compat"]
