@@ -7,6 +7,7 @@ import { logActivity } from '../lib/activity';
 import { isManagedKey, listSettings, putSetting } from '../lib/config';
 import { parseLeadsCsv, toCsv } from '../lib/csv';
 import { normalizeDomain } from '../lib/crawler';
+import { removeDemoData, seedDemoData } from '../lib/demoData';
 import { gmailConfigured, gmailGetProfile, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
 import { getHealth } from '../lib/health';
 import { getDailyCap, getSentToday, isSendingPaused, setSendingPaused } from '../lib/kvconf';
@@ -272,6 +273,7 @@ api.post('/leads/:id/email', async (c) => {
   const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
   if (!lead) return c.json({ error: 'not found' }, 404);
   if (!lead.email) return c.json({ error: 'lead has no email' }, 400);
+  if (lead.source === 'demo') return c.json({ error: 'this is a demo lead — nothing can be sent to it' }, 400);
   const body = (await c.req.json().catch(() => ({}))) as { subject?: string; body?: string };
   if (!body.subject?.trim() || !body.body?.trim()) return c.json({ error: 'subject and body required' }, 400);
   const suppressed = await c.env.DB.prepare('SELECT reason FROM suppression WHERE email = ?')
@@ -304,6 +306,52 @@ api.post('/leads/:id/email', async (c) => {
     .run();
   await logActivity(c.env.DB, 'owner', 'manual_email_sent', id, { subject: body.subject.trim() });
   return c.json({ ok: true, gmail_message_id: sent.id });
+});
+
+/** Unified mailbox for the Mail tab: every logged email joined with its lead. */
+api.get('/emails', async (c) => {
+  const q = c.req.query();
+  const conds: string[] = [];
+  const binds: unknown[] = [];
+  if (q.direction === 'in' || q.direction === 'out') {
+    conds.push('e.direction = ?');
+    binds.push(q.direction);
+  }
+  if (q.kind === 'real') conds.push('e.dry_run = 0');
+  else if (q.kind === 'test') conds.push('e.dry_run = 1');
+  if (q.q) {
+    conds.push('(e.subject LIKE ? OR e.body LIKE ? OR l.company_name LIKE ?)');
+    const like = `%${q.q}%`;
+    binds.push(like, like, like);
+  }
+  const where = conds.length ? ` WHERE ${conds.join(' AND ')}` : '';
+  const limit = Math.min(Math.max(parseInt(q.limit ?? '50', 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(q.offset ?? '0', 10) || 0, 0);
+  const total = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM email_log e JOIN leads l ON l.id = e.lead_id${where}`)
+    .bind(...binds)
+    .first<{ n: number }>();
+  const rows = await c.env.DB.prepare(
+    `SELECT e.id, e.lead_id, e.direction, e.sequence_step, e.subject, substr(e.body, 1, 200) AS snippet,
+            e.classification, e.dry_run, e.created_at, l.company_name, l.email AS lead_email, l.status AS lead_status
+     FROM email_log e JOIN leads l ON l.id = e.lead_id${where}
+     ORDER BY e.created_at DESC, e.id DESC LIMIT ? OFFSET ?`,
+  )
+    .bind(...binds, limit, offset)
+    .all();
+  return c.json({ emails: rows.results, total: total?.n ?? 0, offset, limit });
+});
+
+/** Showcase data: fill every screen with sample leads/mail/activity. */
+api.post('/demo/seed', async (c) => {
+  const result = await seedDemoData(c.env.DB);
+  if ('error' in result) return c.json(result, 409);
+  return c.json({ ok: true, ...result });
+});
+
+/** Remove the showcase data (only rows keyed as demo — real leads untouched). */
+api.post('/demo/remove', async (c) => {
+  const counts = await removeDemoData(c.env.DB);
+  return c.json({ ok: true, ...counts });
 });
 
 /** Aggregates for the Analytics tab. */

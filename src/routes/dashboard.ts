@@ -155,6 +155,19 @@ export const DASHBOARD_HTML = `<!doctype html>
   .legend { display:flex; gap:14px; margin-bottom:8px; color:var(--text2); font-size:11px; }
   .legend i { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:4px; }
 
+  /* ---- mail tab ---- */
+  .mailrow { display:flex; gap:10px; padding:10px 8px; border-bottom:1px solid var(--line-soft); cursor:pointer; align-items:flex-start; }
+  .mailrow:hover { background:var(--surface); }
+  .mdir { flex:none; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; margin-top:2px; }
+  .mdir.mout { background:rgba(57,135,229,.16); color:var(--blue); }
+  .mdir.min { background:rgba(25,158,112,.16); color:var(--aqua); }
+  .mmain { flex:1; min-width:0; }
+  .mtop { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .mtop b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+  .msub { color:var(--text2); font-size:12px; margin-top:2px; }
+  .msnip { color:var(--muted); font-size:12px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mtime { flex:none; color:var(--muted); font-size:11px; margin-top:3px; }
+
   /* ---- modal ---- */
   #modal-wrap { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:40; padding:16px; }
   #modal-wrap.open { display:flex; }
@@ -181,6 +194,10 @@ export const DASHBOARD_HTML = `<!doctype html>
     #drawer { width:100vw; }
     #filters input[type=text] { width:130px; }
     .bar-row .lbl { width:84px; }
+    /* All tabs stay visible on a phone: wrap instead of scrolling off-screen. */
+    nav.tabs { flex-wrap:wrap; }
+    nav.tabs button { padding:7px 10px; font-size:13px; }
+    .mtime { display:none; }
   }
 </style>
 </head>
@@ -226,6 +243,7 @@ export const DASHBOARD_HTML = `<!doctype html>
     <div id="content">
       <nav class="tabs">
         <button data-tab="leads" class="active">Leads</button>
+        <button data-tab="mail">Mail</button>
         <button data-tab="analytics">Analytics</button>
         <button data-tab="templates">Templates</button>
         <button data-tab="suppression">Suppression</button>
@@ -448,6 +466,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   });
   function renderTab() {
     if (tab === 'leads') renderLeadsTab();
+    else if (tab === 'mail') renderMailTab();
     else if (tab === 'analytics') renderAnalyticsTab();
     else if (tab === 'templates') renderTemplatesTab();
     else if (tab === 'suppression') renderSuppressionTab();
@@ -755,6 +774,68 @@ export const DASHBOARD_HTML = `<!doctype html>
     }).catch(function () {});
   }
 
+  // ---------- mail ----------
+  var mailOffset = 0;
+  function renderMailTab() {
+    mailOffset = 0;
+    $('tabbody').innerHTML =
+      '<div id="filters">' +
+        '<select id="m-dir"><option value="">all mail</option><option value="out">sent</option><option value="in">received</option></select>' +
+        '<select id="m-kind"><option value="">real + test</option><option value="real">real only</option><option value="test">test (dry run)</option></select>' +
+        '<input type="text" id="m-q" placeholder="Search subject, body, company…">' +
+        '<span style="flex:1"></span><span id="m-count" style="color:var(--muted);align-self:center"></span>' +
+      '</div>' +
+      '<div id="mail-body"></div>' +
+      '<div style="margin-top:10px;text-align:center"><button id="m-more" style="display:none">Load more</button></div>';
+    ['m-dir', 'm-kind'].forEach(function (id) {
+      $(id).addEventListener('change', function () { mailOffset = 0; loadMail(false); });
+    });
+    $('m-q').addEventListener('keydown', function (e) { if (e.key === 'Enter') { mailOffset = 0; loadMail(false); } });
+    $('m-more').addEventListener('click', function () { mailOffset += 50; loadMail(true); });
+    loadMail(false);
+  }
+  function classTag(cls) {
+    var color = cls === 'interested' ? 'var(--good)'
+      : cls === 'opt_out' || cls === 'bounce' ? 'var(--critical)'
+      : cls === 'not_interested' ? 'var(--serious)'
+      : cls === 'ooo' ? 'var(--warn)' : 'var(--muted)';
+    return '<span class="tag"><i style="background:' + color + '"></i>' + esc(cls) + '</span>';
+  }
+  function loadMail(append) {
+    var p = ['limit=50', 'offset=' + mailOffset];
+    if ($('m-dir').value) p.push('direction=' + $('m-dir').value);
+    if ($('m-kind').value) p.push('kind=' + $('m-kind').value);
+    if ($('m-q').value) p.push('q=' + encodeURIComponent($('m-q').value));
+    req('GET', '/api/emails?' + p.join('&')).then(function (data) {
+      var rows = (data.emails || []).map(function (e) {
+        var badges = '';
+        if (e.direction === 'out') badges += '<span class="tag">' + (e.sequence_step ? 'step ' + e.sequence_step : 'manual') + '</span>';
+        if (e.dry_run) badges += '<span class="tag"><i style="background:var(--warn)"></i>DRY RUN</span>';
+        if (e.classification) badges += classTag(e.classification);
+        return '<div class="mailrow" data-lead="' + e.lead_id + '">' +
+          '<span class="mdir ' + (e.direction === 'out' ? 'mout' : 'min') + '">' + (e.direction === 'out' ? '↑' : '↓') + '</span>' +
+          '<div class="mmain">' +
+            '<div class="mtop"><b>' + esc(e.subject || '(no subject)') + '</b>' + badges + '</div>' +
+            '<div class="msub">' + esc(e.company_name) + (e.lead_email ? ' · ' + esc(e.lead_email) : '') + '</div>' +
+            '<div class="msnip">' + esc((e.snippet || '').replace(/\\s+/g, ' ')) + '</div>' +
+          '</div>' +
+          '<span class="mtime num">' + esc((e.created_at || '').slice(0, 16)) + '</span>' +
+        '</div>';
+      }).join('');
+      if (!append) {
+        $('mail-body').innerHTML = rows ||
+          '<div class="empty">No mail yet. Outreach the sequence engine sends — and replies the watcher pulls in — all land here.</div>';
+      } else {
+        $('mail-body').insertAdjacentHTML('beforeend', rows);
+      }
+      $('m-count').textContent = data.total + ' message' + (data.total === 1 ? '' : 's');
+      $('m-more').style.display = mailOffset + 50 < data.total ? '' : 'none';
+      Array.prototype.forEach.call(document.querySelectorAll('.mailrow[data-lead]'), function (el) {
+        el.onclick = function () { openDrawer(el.getAttribute('data-lead')); };
+      });
+    });
+  }
+
   // ---------- analytics ----------
   function hbar(label, value, max, color) {
     var pct = max > 0 ? Math.max(2, Math.round((value / max) * 100)) : 2;
@@ -982,6 +1063,12 @@ export const DASHBOARD_HTML = `<!doctype html>
         '<button id="cap-reset">Reset to default (' + cap.default + ')</button>' +
         '<span class="placeholders">Go-live ramp: 10/day week 1 → 20 → 35 → 50. Never raise it faster than weekly.</span></div></div>';
 
+      h += '<div class="tpl"><div class="top"><b>Demo data</b><span class="tag"><i style="background:var(--violet)"></i>showcase</span></div>' +
+        '<div class="placeholders" style="margin-bottom:10px">Fills every screen with 14 sample leads, mail threads and activity so you can explore the whole CRM. ' +
+        'Nothing is ever sent — demo addresses use the reserved .example.com domain and demo mail is marked DRY RUN. Remove it before go-live.</div>' +
+        '<div class="foot"><button id="demo-seed">Seed demo data</button><button id="demo-remove" class="danger">Remove demo data</button></div>' +
+        '<div id="demo-out" style="margin-top:8px;color:var(--text2)"></div></div>';
+
       h += '<div class="tpl"><div class="top"><b>Connect Gmail</b><span class="tag"><i style="background:var(--blue)"></i>guided</span></div>' +
         '<div class="placeholders" style="margin-bottom:10px;line-height:1.8">' +
           '1. In <b>console.cloud.google.com</b>: enable the <b>Gmail API</b>, set up the OAuth consent screen, then Credentials → Create OAuth client ID → type <b>Web application</b>.<br>' +
@@ -1047,6 +1134,25 @@ export const DASHBOARD_HTML = `<!doctype html>
           }).catch(function () { $('itest-out').textContent = 'Test failed to run.'; });
         };
       });
+      $('demo-seed').onclick = function () {
+        $('demo-seed').disabled = true;
+        $('demo-out').textContent = 'Seeding…';
+        req('POST', '/api/demo/seed').then(function (r) {
+          $('demo-seed').disabled = false;
+          $('demo-out').textContent = 'Seeded ' + r.leads + ' leads, ' + r.emails + ' emails and ' + r.activities + ' activities.';
+          loadStats();
+        }).catch(function (e) { $('demo-seed').disabled = false; $('demo-out').textContent = (e && e.message) || 'Seed failed.'; });
+      };
+      $('demo-remove').onclick = function () {
+        if (!confirm('Remove all demo rows (leads, mail, activity marked as demo)? Real leads are untouched.')) return;
+        $('demo-remove').disabled = true;
+        $('demo-out').textContent = 'Removing…';
+        req('POST', '/api/demo/remove').then(function (r) {
+          $('demo-remove').disabled = false;
+          $('demo-out').textContent = 'Removed ' + r.leads + ' leads, ' + r.emails + ' emails, ' + r.activities + ' activities.';
+          loadStats();
+        }).catch(function (e) { $('demo-remove').disabled = false; $('demo-out').textContent = (e && e.message) || 'Remove failed.'; });
+      };
     });
   }
 

@@ -108,7 +108,7 @@ async function flagExhaustedLeads(env: Env): Promise<number> {
   const rows = await db
     .prepare(
       `SELECT * FROM leads WHERE status = 'contacted' AND sequence_step >= 3
-       AND next_action_at IS NOT NULL AND next_action_at <= ?`,
+       AND next_action_at IS NOT NULL AND next_action_at <= ? AND source != 'demo'`,
     )
     .bind(now)
     .all<Lead>();
@@ -162,6 +162,7 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
          AND l.email IS NOT NULL
          AND l.next_action_at IS NOT NULL AND l.next_action_at <= ?
          AND l.email NOT IN (SELECT email FROM suppression)
+         AND l.source != 'demo'
        ORDER BY l.next_action_at ASC
        LIMIT 50`,
     )
