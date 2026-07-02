@@ -123,12 +123,83 @@ export function segmented(options, value, onChange) {
 }
 
 // ---------- modal ----------
+let modalCloseHook = null; // lets promise-based modals resolve on ANY close path (Esc, scrim)
+
 export function openModal(html) {
   $('modal').innerHTML = html;
   $('modal-wrap').classList.add('open');
 }
 export function closeModal() {
   $('modal-wrap').classList.remove('open');
+  if (modalCloseHook) { const fn = modalCloseHook; modalCloseHook = null; fn(); }
+}
+
+/**
+ * Input modal — the design-system replacement for prompt().
+ * fields: [{key, label, placeholder?, value?, type?('text'|'textarea'|'date'), required?}]
+ * Resolves with {key: value, ...} on confirm, or null on cancel/Esc.
+ */
+export function inputModal({ title, fields, confirmLabel = 'Save', hint = '' }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+    modalCloseHook = () => settle(null);
+
+    openModal(`<h3>${esc(title)}</h3>
+      ${fields.map((f) => `<div class="frow"><label>${esc(f.label)}</label>${
+        f.type === 'textarea'
+          ? `<textarea data-mkey="${esc(f.key)}" rows="3" placeholder="${esc(f.placeholder || '')}">${esc(f.value || '')}</textarea>`
+          : `<input data-mkey="${esc(f.key)}" type="${f.type === 'date' ? 'date' : f.type === 'password' ? 'password' : 'text'}" placeholder="${esc(f.placeholder || '')}" value="${esc(f.value || '')}">`
+      }</div>`).join('')}
+      ${hint ? `<div class="hint-bar">${esc(hint)}</div>` : ''}
+      <div class="actions" style="margin-top:12px;justify-content:flex-end">
+        <button id="im-cancel">Cancel</button>
+        <button class="primary" id="im-ok">${esc(confirmLabel)}</button>
+      </div>`);
+
+    const inputs = [...$('modal').querySelectorAll('[data-mkey]')];
+    const submit = () => {
+      const out = {};
+      for (const el of inputs) {
+        const f = fields.find((x) => x.key === el.dataset.mkey);
+        const v = el.value.trim();
+        if (f && f.required && !v) { el.focus(); el.style.borderColor = 'var(--warn)'; return; }
+        out[el.dataset.mkey] = v;
+      }
+      modalCloseHook = null;
+      closeModal();
+      settle(out);
+    };
+    $('im-ok').onclick = submit;
+    $('im-cancel').onclick = () => closeModal();
+    inputs.forEach((el) => {
+      if (el.tagName !== 'TEXTAREA') el.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    });
+    if (inputs[0]) inputs[0].focus();
+  });
+}
+
+/**
+ * Confirm modal — the design-system replacement for confirm().
+ * Resolves true on confirm, false on cancel/Esc.
+ */
+export function confirmModal({ title = 'Are you sure?', message, confirmLabel = 'Confirm', danger = false }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+    modalCloseHook = () => settle(false);
+
+    openModal(`<h3>${esc(title)}</h3>
+      <p style="color:var(--t2);margin:0 0 14px">${esc(message)}</p>
+      <div class="actions" style="justify-content:flex-end">
+        <button id="cm-cancel">Cancel</button>
+        <button class="${danger ? 'danger' : 'primary'}" id="cm-ok">${esc(confirmLabel)}</button>
+      </div>`);
+    const ok = $('cm-ok');
+    ok.onclick = () => { modalCloseHook = null; closeModal(); settle(true); };
+    $('cm-cancel').onclick = () => closeModal();
+    ok.focus();
+  });
 }
 
 // ---------- drawer host (content is provided by drawer.js) ----------

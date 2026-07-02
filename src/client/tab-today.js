@@ -1,8 +1,9 @@
 // Today — the home screen. Answers "what do I do right now" with zero clicks:
 // needs-reply queue, calls due, tasks due/overdue, hot leads, KPI strip.
-import { $, esc, req, toast, chip, classChip, statusChip, emptyHtml, skeletons, fmtDate } from './core.js';
+import { $, esc, req, toast, chip, classChip, statusChip, emptyHtml, skeletons, fmtDate, inputModal } from './core.js';
 import { openLead, onLeadChange } from './drawer.js';
 import { goTab } from './app.js';
+import { focusThread } from './tab-inbox.js';
 
 export const id = 'today';
 export const title = 'Today';
@@ -113,7 +114,10 @@ function load() {
     el.innerHTML = h;
 
     el.querySelectorAll('[data-lead]').forEach((row) => {
-      if (row.classList.contains('mailrow') || row.classList.contains('click')) {
+      if (row.classList.contains('mailrow')) {
+        // A reply belongs in the Inbox thread view, not the lead drawer.
+        row.onclick = () => { focusThread(+row.dataset.lead); goTab('inbox'); };
+      } else if (row.classList.contains('click')) {
         row.onclick = (e) => {
           if (e.target.closest('button')) return; // buttons handle themselves
           openLead(row.dataset.lead);
@@ -139,10 +143,18 @@ function load() {
   });
 }
 
-function quickTask() {
-  const titleText = window.prompt('Task title');
-  if (!titleText || !titleText.trim()) return;
-  req('POST', '/api/tasks', { title: titleText.trim() }).then(() => { toast('Task added', 'ok'); load(); });
+async function quickTask() {
+  const ans = await inputModal({
+    title: 'New task',
+    fields: [
+      { key: 'title', label: 'task', placeholder: 'e.g. Follow up with Lotus Grand', required: true },
+      { key: 'due_at', label: 'due', type: 'date' },
+    ],
+    confirmLabel: 'Add task',
+  });
+  if (!ans) return;
+  req('POST', '/api/tasks', { title: ans.title, due_at: ans.due_at || undefined })
+    .then(() => { toast('Task added', 'ok'); load(); });
 }
 
 export function keys(k) {

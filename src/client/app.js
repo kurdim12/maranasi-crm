@@ -1,5 +1,5 @@
 // Command Center shell: boot, login, tabs, keyboard, ⌘K palette, chat.
-import { $, esc, req, toast, state, closeModal, closeDrawer, isDrawerOpen, debounce } from './core.js';
+import { $, esc, req, toast, state, closeModal, closeDrawer, isDrawerOpen, debounce, inputModal } from './core.js';
 import { openLead } from './drawer.js';
 import * as today from './tab-today.js';
 import * as inbox from './tab-inbox.js';
@@ -316,15 +316,20 @@ $('btn-resume').addEventListener('click', () =>
   req('POST', '/api/sending/resume').then(() => { toast('Sending resumed', 'ok'); loadStats(); }));
 $('btn-logout').addEventListener('click', () =>
   fetch('/auth/logout', { method: 'POST' }).then(() => showLogin('Signed out.')));
-$('btn-passwd').addEventListener('click', () => {
-  const cur = window.prompt('Current password');
-  if (!cur) return;
-  const nw = window.prompt('New password (min 8 characters)');
-  if (!nw) return;
+$('btn-passwd').addEventListener('click', async () => {
+  const ans = await inputModal({
+    title: 'Change password',
+    fields: [
+      { key: 'cur', label: 'current', type: 'password', required: true },
+      { key: 'nw', label: 'new (min 8)', type: 'password', required: true },
+    ],
+    confirmLabel: 'Change password',
+  });
+  if (!ans) return;
   fetch('/auth/password', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ current_password: cur, new_password: nw }),
+    body: JSON.stringify({ current_password: ans.cur, new_password: ans.nw }),
   }).then((r) => r.json()).then((d) => toast(d.ok ? 'Password changed' : d.error || 'Failed', d.ok ? 'ok' : 'err'));
 });
 

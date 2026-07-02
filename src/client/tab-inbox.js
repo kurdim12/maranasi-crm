@@ -1,6 +1,6 @@
 // Inbox v2 — triage console. Queues left, threads center, conversation right.
 // Keyboard: j/k move · enter open · r reply · e done · h snooze · esc back.
-import { $, esc, req, toast, chip, classChip, emptyHtml, skeletons, fmtDate } from './core.js';
+import { $, esc, req, toast, chip, classChip, emptyHtml, skeletons, fmtDate, inputModal, confirmModal } from './core.js';
 import { openLead, onLeadChange } from './drawer.js';
 
 export const id = 'inbox';
@@ -22,6 +22,13 @@ let threads = [];
 let sel = -1;
 let openThread = null; // lead_id currently open in the conversation pane
 let registered = false;
+let pendingFocus = null; // lead_id another tab asked us to open on next render
+
+/** Other tabs (Today) route here with a specific thread focused. */
+export function focusThread(leadId) {
+  queue = 'needs_reply';
+  pendingFocus = leadId;
+}
 
 export function render(root) {
   root.innerHTML = `
@@ -68,6 +75,11 @@ function load() {
     if (!$('ib-list')) return;
     threads = d.threads || [];
     renderRail(d.counts || {});
+    if (pendingFocus !== null) {
+      const i = threads.findIndex((t) => t.lead_id === pendingFocus);
+      pendingFocus = null;
+      if (i >= 0) { sel = i; renderList(); openConversation(threads[i].lead_id); return; }
+    }
     renderList();
   }).catch(() => {});
 }
@@ -168,11 +180,16 @@ function openConversation(leadId, keepScroll) {
         .finally(() => { draftBtn.disabled = false; draftBtn.textContent = '✦ AI draft'; });
     };
     const sendBtn = $('cv-send');
-    if (sendBtn) sendBtn.onclick = () => {
+    if (sendBtn) sendBtn.onclick = async () => {
       const subject = $('cv-subject').value.trim();
       const bodyText = $('cv-body').value.trim();
       if (!subject || !bodyText) { toast('Subject and body required', 'err'); return; }
-      if (!window.confirm(`Send this email to ${l.email} now? This is a REAL send.`)) return;
+      const go = await confirmModal({
+        title: 'Send for real?',
+        message: `This sends a real email to ${l.email} from your connected inbox right now.`,
+        confirmLabel: 'Send email',
+      });
+      if (!go) return;
       sendBtn.disabled = true;
       req('POST', `/api/leads/${leadId}/email`, { subject, body: bodyText })
         .then(() => { toast(`Sent to ${l.email}`, 'ok'); load(); openConversation(leadId, true); })
@@ -202,18 +219,24 @@ function markDone(leadId) {
   });
 }
 
-function snooze(leadId) {
+async function snooze(leadId) {
   const emailId = currentEmailId(leadId);
   if (!emailId) return;
-  const pick = window.prompt('Snooze for how long? 1d / 3d / or a date (YYYY-MM-DD)', '1d');
-  if (!pick) return;
+  const ans = await inputModal({
+    title: 'Snooze thread',
+    fields: [{ key: 'when', label: 'for', value: '1d', placeholder: '1d · 3d · YYYY-MM-DD', required: true }],
+    confirmLabel: 'Snooze',
+    hint: 'It returns to Needs reply when time is up.',
+  });
+  if (!ans) return;
+  const pick = ans.when;
   let until;
-  const m = pick.trim().match(/^(\d+)d$/i);
+  const m = pick.match(/^(\d+)d$/i);
   if (m) {
     const dt = new Date(Date.now() + parseInt(m[1], 10) * 86400000);
     until = dt.toISOString().slice(0, 19).replace('T', ' ');
   } else if (!Number.isNaN(Date.parse(pick))) {
-    until = `${pick.trim().slice(0, 10)} 06:00:00`;
+    until = `${pick.slice(0, 10)} 06:00:00`;
   } else { toast('Use 1d, 3d, or YYYY-MM-DD', 'err'); return; }
   req('POST', `/api/emails/${emailId}/triage`, { action: 'snooze', until }).then(() => {
     toast(`Snoozed until ${until.slice(0, 10)}`, 'ok');

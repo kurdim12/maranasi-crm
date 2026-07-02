@@ -10,6 +10,7 @@ import { normalizeDomain } from '../lib/crawler';
 import { removeDemoData, seedDemoData } from '../lib/demoData';
 import { transitionDeal } from '../lib/dealMachine';
 import { createTaskOnce, markLeadReplied, resolvedTriage } from '../lib/pipelineHooks';
+import { manualSendGuard } from '../lib/sendGuards';
 import { gmailConfigured, gmailGetProfile, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
 import { getHealth } from '../lib/health';
 import { getDailyCap, getSentToday, isSendingPaused, setSendingPaused } from '../lib/kvconf';
@@ -51,8 +52,10 @@ api.get('/leads', async (c) => {
   }
   if (needs_call === '1' || needs_call === 'true') clauses.push('needs_call = 1');
   if (q) {
-    clauses.push('(company_name LIKE ? OR notes LIKE ? OR email LIKE ?)');
-    binds.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    // Case-insensitive substring across the fields people actually search by.
+    clauses.push('(company_name LIKE ? OR domain LIKE ? OR contact_name LIKE ? OR email LIKE ? OR notes LIKE ? OR city LIKE ?)');
+    const like = `%${q}%`;
+    binds.push(like, like, like, like, like, like);
   }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const rows = await c.env.DB.prepare(
@@ -233,11 +236,11 @@ api.post('/leads/:id/verify', async (c) => {
 
 api.post('/leads/:id/call-outcome', async (c) => {
   const id = parseInt(c.req.param('id'), 10);
-  const body = (await c.req.json().catch(() => ({}))) as { outcome?: string };
+  const body = (await c.req.json().catch(() => ({}))) as { outcome?: string; note?: string };
   if (body.outcome !== 'reached' && body.outcome !== 'unresponsive') {
     return c.json({ error: "outcome must be 'reached' or 'unresponsive'" }, 400);
   }
-  const result = await markCallOutcome(c.env, id, body.outcome, 'owner');
+  const result = await markCallOutcome(c.env, id, body.outcome, 'owner', body.note ?? null);
   return c.json(result, 'error' in result ? 404 : 200);
 });
 
@@ -280,16 +283,13 @@ api.post('/leads/:id/email', async (c) => {
   const id = parseInt(c.req.param('id'), 10);
   const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
   if (!lead) return c.json({ error: 'not found' }, 404);
-  if (!lead.email) return c.json({ error: 'lead has no email' }, 400);
-  if (lead.source === 'demo') return c.json({ error: 'this is a demo lead — nothing can be sent to it' }, 400);
   const body = (await c.req.json().catch(() => ({}))) as { subject?: string; body?: string };
   if (!body.subject?.trim() || !body.body?.trim()) return c.json({ error: 'subject and body required' }, 400);
-  const suppressed = await c.env.DB.prepare('SELECT reason FROM suppression WHERE email = ?')
-    .bind(lead.email.toLowerCase())
-    .first<{ reason: string }>();
-  if (suppressed) {
-    return c.json({ error: `this address is suppressed (${suppressed.reason}) — it opted out or bounced` }, 403);
-  }
+  const suppressed = lead.email
+    ? await c.env.DB.prepare('SELECT reason FROM suppression WHERE email = ?').bind(lead.email.toLowerCase()).first()
+    : null;
+  const refusal = manualSendGuard(lead, !!suppressed);
+  if (refusal) return c.json({ error: refusal.error }, refusal.status);
   if (!gmailConfigured(c.env)) return c.json({ error: 'Gmail is not connected — Settings → Connect Gmail' }, 400);
 
   const prevOut = await c.env.DB.prepare(
@@ -300,7 +300,7 @@ api.post('/leads/:id/email', async (c) => {
   const threadId = prevOut?.gmail_thread_id ?? undefined;
   const replyHeaders = threadId ? await gmailThreadReplyHeaders(c.env, threadId) : {};
   const sent = await gmailSend(c.env, {
-    to: lead.email,
+    to: lead.email!, // manualSendGuard already refused email-less leads
     subject: body.subject.trim(),
     body: body.body,
     threadId,
@@ -777,6 +777,22 @@ api.put('/templates/:id', async (c) => {
   const whitelist = ['name', 'subject_template', 'body_template', 'active'];
   const accepted = Object.entries(body).filter(([k]) => whitelist.includes(k));
   if (!accepted.length) return c.json({ error: 'no editable fields', whitelist }, 400);
+  // Compliance validator: an active outreach template must carry an explicit
+  // opt-out line. Check the incoming body if provided, else the stored one.
+  const willBeActive = 'active' in body ? !!body.active : true;
+  if (willBeActive) {
+    const bodyText =
+      typeof body.body_template === 'string'
+        ? body.body_template
+        : ((await c.env.DB.prepare('SELECT body_template FROM templates WHERE id = ?').bind(id).first<{ body_template: string }>())
+            ?.body_template ?? '');
+    if (!/unsubscribe|opt.?out|rather not hear/i.test(bodyText)) {
+      return c.json(
+        { error: 'An active template needs an explicit opt-out line (e.g. “…just reply "unsubscribe".”) — add one, then save.' },
+        400,
+      );
+    }
+  }
   const sets = accepted.map(([k]) => `${k} = ?`).join(', ');
   await c.env.DB.prepare(`UPDATE templates SET ${sets} WHERE id = ?`)
     .bind(...accepted.map(([, v]) => v), id)

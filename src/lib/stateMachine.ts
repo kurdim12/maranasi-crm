@@ -84,7 +84,15 @@ export async function transitionLead(
   assertTransition(from, to);
 
   if (to === 'dropped') {
-    if (lead.phone_status !== 'unresponsive') {
+    // Re-read phone_status LIVE at the moment of the drop — never trust the
+    // caller's (possibly stale) lead object for the gate. A lead mutated
+    // between the caller's read and this transition must be judged on its
+    // current state.
+    const live = await db
+      .prepare('SELECT phone_status FROM leads WHERE id = ?')
+      .bind(lead.id)
+      .first<{ phone_status: string }>();
+    if (!live || live.phone_status !== 'unresponsive') {
       throw new IllegalTransitionError(
         from,
         to,

@@ -1,6 +1,6 @@
 // Pipeline — deal kanban (drag to move stage) + list view + open tasks.
 // Interested leads auto-create deals; won/lost prompt for value/reason.
-import { $, esc, req, toast, chip, segmented, emptyHtml, skeletons, fmtDate } from './core.js';
+import { $, esc, req, toast, chip, segmented, emptyHtml, skeletons, fmtDate, inputModal } from './core.js';
 import { openLead, onLeadChange } from './drawer.js';
 import { goTab } from './app.js';
 
@@ -145,18 +145,26 @@ function stageChip(stage) {
   return chip(s ? s.label : stage, color, stage === 'negotiation' ? 'hot' : '');
 }
 
-export function moveDeal(dealId, from, to) {
+export async function moveDeal(dealId, from, to) {
   if (from === to) return;
   const body = { stage: to };
   if (to === 'won') {
-    const v = window.prompt('Deal value in USD? (optional — Enter to skip)');
-    if (v === null) { load(); return; }
-    if (v.trim()) body.value_usd = parseInt(v.replace(/[^\d]/g, ''), 10) || null;
+    const ans = await inputModal({
+      title: '🎉 Mark deal as won',
+      fields: [{ key: 'value', label: 'value USD', placeholder: 'optional — leave empty to skip' }],
+      confirmLabel: 'Mark won',
+    });
+    if (!ans) { load(); return; }
+    if (ans.value) body.value_usd = parseInt(ans.value.replace(/[^\d]/g, ''), 10) || null;
   }
   if (to === 'lost') {
-    const reason = window.prompt('Why was it lost? (required)');
-    if (!reason || !reason.trim()) { toast('Lost needs a reason — deal unchanged', 'err'); load(); return; }
-    body.lost_reason = reason.trim();
+    const ans = await inputModal({
+      title: 'Mark deal as lost',
+      fields: [{ key: 'reason', label: 'why lost', placeholder: 'e.g. budget cut, went with local vendor', required: true }],
+      confirmLabel: 'Mark lost',
+    });
+    if (!ans) { toast('Lost needs a reason — deal unchanged', 'err'); load(); return; }
+    body.lost_reason = ans.reason;
   }
   req('PATCH', `/api/deals/${dealId}`, body)
     .then(() => { toast(to === 'won' ? '🎉 Won' : `Moved to ${to.replace(/_/g, ' ')}`, to === 'lost' ? undefined : 'ok'); load(); })

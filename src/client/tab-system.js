@@ -5,7 +5,7 @@
 // change: same endpoints, same payload shapes. The last-viewed section is
 // remembered in localStorage under 'mo.system'.
 import {
-  $, esc, req, toast, chip, classChip, empty, emptyHtml, skeletons,
+  $, esc, req, toast, chip, classChip, empty, emptyHtml, skeletons, confirmModal,
 } from './core.js';
 import { openLead, onLeadChange } from './drawer.js';
 import { loadStats } from './app.js';
@@ -168,9 +168,15 @@ function renderSuppression() {
       }).catch(() => {});
     };
     $('sys-body').querySelectorAll('.sup-del').forEach((b) => {
-      b.onclick = () => {
+      b.onclick = async () => {
         const email = b.getAttribute('data-email');
-        if (!window.confirm(`Remove ${email} from the suppression list?`)) return;
+        const go = await confirmModal({
+          title: 'Remove from suppression?',
+          message: `${email} could be emailed again by future sends. Only remove addresses suppressed by mistake.`,
+          confirmLabel: 'Remove',
+          danger: true,
+        });
+        if (!go) return;
         req('DELETE', `/api/suppression/${encodeURIComponent(email)}`).then(() => {
           toast(`Removed ${email}`, 'ok');
           renderSuppression();
@@ -385,8 +391,14 @@ function renderSettings() {
         $('demo-out').textContent = (e && e.message) || 'Seed failed.';
       });
     };
-    $('demo-remove').onclick = () => {
-      if (!window.confirm('Remove all demo rows (leads, mail, activity marked as demo)? Real leads are untouched.')) return;
+    $('demo-remove').onclick = async () => {
+      const go = await confirmModal({
+        title: 'Remove demo data?',
+        message: 'Deletes every row marked as demo — leads, mail, activity. Real leads are untouched.',
+        confirmLabel: 'Remove demo data',
+        danger: true,
+      });
+      if (!go) return;
       $('demo-remove').disabled = true;
       $('demo-out').textContent = 'Removing…';
       req('POST', '/api/demo/remove').then((r) => {

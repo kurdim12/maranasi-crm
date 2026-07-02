@@ -2,7 +2,7 @@
 // v1 renderLeadsTab/loadLeads/loadBoard/openAddLead/openImport/exportCsv.
 import {
   $, esc, req, toast, state, chip, statusChip, STATUS_COLORS,
-  empty, skeletons, segmented, dataTable, openModal, closeModal,
+  empty, skeletons, segmented, dataTable, openModal, closeModal, debounce,
 } from './core.js';
 import { openLead, onLeadChange } from './drawer.js';
 import { loadStats } from './app.js';
@@ -78,6 +78,9 @@ export function render(root) {
   ['f-status', 'f-country', 'f-needs-call'].forEach((fid) => {
     $(fid).addEventListener('change', () => { offset = 0; loadLeads(false); });
   });
+  // Live search: filters as you type, like every other filter — no Enter needed.
+  const liveSearch = debounce(() => { offset = 0; loadLeads(false); }, 200);
+  $('f-q').addEventListener('input', liveSearch);
   $('f-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { offset = 0; loadLeads(false); } });
   $('btn-add').addEventListener('click', openAddLead);
   $('btn-import').addEventListener('click', openImport);

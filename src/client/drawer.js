@@ -1,7 +1,7 @@
 // Lead drawer — shared by Leads, Inbox, Today and the palette.
 import {
   $, esc, req, toast, chip, statusChip, openModal, closeModal,
-  openDrawerHost, closeDrawer, emptyHtml,
+  openDrawerHost, closeDrawer, emptyHtml, inputModal, confirmModal,
 } from './core.js';
 
 // Other views can subscribe to refresh after drawer mutations.
@@ -122,10 +122,19 @@ export function openLead(id) {
       ['contact_name', 'phone', 'city', 'category'].forEach((f) => { body[f] = $(`ed-${f}`).value; });
       req('PATCH', `/api/leads/${id}`, body).then(() => { toast('Lead saved', 'ok'); changed(); reopen(); });
     };
-    $('d-reached').onclick = () =>
-      req('POST', `/api/leads/${id}/call-outcome`, { outcome: 'reached' }).then(() => { toast('Logged: call reached', 'ok'); changed(); reopen(); });
-    $('d-noanswer').onclick = () =>
-      req('POST', `/api/leads/${id}/call-outcome`, { outcome: 'unresponsive' }).then(() => { toast('Logged: no answer', 'ok'); changed(); reopen(); });
+    const logCall = async (outcome, label) => {
+      const ans = await inputModal({
+        title: label,
+        fields: [{ key: 'note', label: 'note', type: 'textarea', placeholder: 'optional — what was said, callback time…' }],
+        confirmLabel: 'Log call',
+        hint: outcome === 'unresponsive' ? 'Logging "no answer" is the human gate that later allows the agent to drop this lead.' : '',
+      });
+      if (!ans) return;
+      req('POST', `/api/leads/${id}/call-outcome`, { outcome, note: ans.note || undefined })
+        .then(() => { toast(`Logged: ${label.toLowerCase()}`, 'ok'); changed(); reopen(); });
+    };
+    $('d-reached').onclick = () => logCall('reached', 'Call reached');
+    $('d-noanswer').onclick = () => logCall('unresponsive', 'Call: no answer');
     $('d-verify').onclick = () =>
       req('POST', `/api/leads/${id}/verify`).then((r) => { toast(`Verification: ${r.reason}`, r.ok ? 'ok' : 'err'); changed(); reopen(); });
     if ($('d-preview')) $('d-preview').onclick = () =>
@@ -141,7 +150,7 @@ export function openLead(id) {
       req('POST', `/api/leads/${id}/sequence/pause`).then(() => { toast('Follow-ups paused'); changed(); reopen(); });
     if ($('d-resume')) $('d-resume').onclick = () =>
       req('POST', `/api/leads/${id}/sequence/resume`).then(() => { toast('Follow-ups resumed', 'ok'); changed(); reopen(); });
-    if ($('dl-save') && deal) $('dl-save').onclick = () => {
+    if ($('dl-save') && deal) $('dl-save').onclick = async () => {
       const newStage = $('dl-stage') ? $('dl-stage').value : deal.stage;
       const body = {
         value_usd: $('dl-value').value.trim() ? parseInt($('dl-value').value.replace(/[^\d]/g, ''), 10) : null,
@@ -151,9 +160,13 @@ export function openLead(id) {
       if (newStage !== deal.stage) {
         body.stage = newStage;
         if (newStage === 'lost') {
-          const reason = window.prompt('Why was it lost? (required)');
-          if (!reason || !reason.trim()) { toast('Lost needs a reason', 'err'); return; }
-          body.lost_reason = reason.trim();
+          const ans = await inputModal({
+            title: 'Mark deal as lost',
+            fields: [{ key: 'reason', label: 'why lost', placeholder: 'e.g. budget cut, went with local vendor', required: true }],
+            confirmLabel: 'Mark lost',
+          });
+          if (!ans) return;
+          body.lost_reason = ans.reason;
         }
       }
       req('PATCH', `/api/deals/${deal.id}`, body).then(() => { toast('Deal saved', 'ok'); changed(); reopen(); });
@@ -161,16 +174,29 @@ export function openLead(id) {
     document.querySelectorAll('.dl-task-done').forEach((b) => {
       b.onclick = () => req('POST', `/api/tasks/${b.dataset.task}/done`).then(() => { toast('Task done', 'ok'); changed(); reopen(); });
     });
-    if ($('dl-task-add')) $('dl-task-add').onclick = () => {
-      const titleText = window.prompt('Task title');
-      if (!titleText || !titleText.trim()) return;
-      req('POST', '/api/tasks', { title: titleText.trim(), lead_id: id }).then(() => { toast('Task added', 'ok'); changed(); reopen(); });
+    if ($('dl-task-add')) $('dl-task-add').onclick = async () => {
+      const ans = await inputModal({
+        title: `Task for ${l.company_name}`,
+        fields: [
+          { key: 'title', label: 'task', placeholder: 'e.g. Send portfolio deck', required: true },
+          { key: 'due_at', label: 'due', type: 'date' },
+        ],
+        confirmLabel: 'Add task',
+      });
+      if (!ans) return;
+      req('POST', '/api/tasks', { title: ans.title, lead_id: id, due_at: ans.due_at || undefined })
+        .then(() => { toast('Task added', 'ok'); changed(); reopen(); });
     };
-    if ($('re-send')) $('re-send').onclick = () => {
+    if ($('re-send')) $('re-send').onclick = async () => {
       const subject = $('re-subject').value.trim();
       const body = $('re-body').value.trim();
       if (!subject || !body) { toast('Subject and body required', 'err'); return; }
-      if (!window.confirm(`Send this email to ${l.email || ''} now? This is a REAL send.`)) return;
+      const go = await confirmModal({
+        title: 'Send for real?',
+        message: `This sends a real email to ${l.email || ''} from your connected inbox right now.`,
+        confirmLabel: 'Send email',
+      });
+      if (!go) return;
       $('re-send').disabled = true;
       req('POST', `/api/leads/${id}/email`, { subject, body })
         .then(() => { toast(`Email sent to ${l.email}`, 'ok'); changed(); reopen(); })

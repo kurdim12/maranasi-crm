@@ -197,6 +197,7 @@ export async function markCallOutcome(
   id: number,
   outcome: 'reached' | 'unresponsive',
   actor: Actor,
+  note?: string | null,
 ): Promise<Record<string, unknown>> {
   const db = env.DB;
   const lead = await getLeadOr404(db, id);
@@ -205,7 +206,11 @@ export async function markCallOutcome(
     .prepare('UPDATE leads SET phone_status = ?, needs_call = 0, updated_at = ? WHERE id = ?')
     .bind(outcome, nowIso(), id)
     .run();
-  await logActivity(db, actor, 'call_outcome', id, { outcome, previous_phone_status: lead.phone_status });
+  await logActivity(db, actor, 'call_outcome', id, {
+    outcome,
+    previous_phone_status: lead.phone_status,
+    ...(note?.trim() ? { note: note.trim() } : {}),
+  });
   return { ok: true, id, phone_status: outcome, needs_call: 0 };
 }
 
