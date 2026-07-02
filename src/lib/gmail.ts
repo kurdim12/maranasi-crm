@@ -82,6 +82,8 @@ export interface SendArgs {
   threadId?: string;
   inReplyTo?: string; // RFC 822 Message-ID of the message being replied to
   references?: string;
+  /** outreach sends set this: adds a List-Unsubscribe mailto header (sender-guideline compliance) */
+  listUnsubscribe?: boolean;
 }
 
 export async function gmailSend(env: Env, args: SendArgs): Promise<{ id: string; threadId: string }> {
@@ -95,6 +97,9 @@ export async function gmailSend(env: Env, args: SendArgs): Promise<{ id: string;
   ];
   if (args.inReplyTo) lines.push(`In-Reply-To: ${args.inReplyTo}`);
   if (args.references) lines.push(`References: ${args.references}`);
+  if (args.listUnsubscribe && env.SENDER_EMAIL) {
+    lines.push(`List-Unsubscribe: <mailto:${env.SENDER_EMAIL}?subject=unsubscribe>`);
+  }
   lines.push('MIME-Version: 1.0', 'Content-Type: text/plain; charset="UTF-8"', 'Content-Transfer-Encoding: 8bit', '', args.body);
 
   const raw = base64url(new TextEncoder().encode(lines.join('\r\n')));

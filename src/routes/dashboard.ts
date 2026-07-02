@@ -352,6 +352,11 @@ export const DASHBOARD_HTML = `<!doctype html>
   function loadStats() {
     return req('GET', '/api/stats').then(function (s) {
       var b = s.by_status || {};
+      var tick = s.health && s.health.jobs ? s.health.jobs.tick : null;
+      var mins = tick ? Math.round((Date.now() - new Date(tick).getTime()) / 60000) : null;
+      var cronVal = mins === null ? '—' : (mins < 1 ? 'now' : mins + 'm ago');
+      var cronCol = mins === null ? 'var(--muted)' : (mins <= 20 ? 'var(--good)' : 'var(--critical)');
+      var errs = s.health ? s.health.errors_24h : 0;
       $('kpis').innerHTML =
         kpi(s.total, 'total leads') +
         kpi(b.verified || 0, 'verified', 'var(--blue)') +
@@ -360,7 +365,9 @@ export const DASHBOARD_HTML = `<!doctype html>
         kpi(s.needs_call, 'needs call', 'var(--warn)') +
         kpi(s.sent_7d, 'sent · 7d') +
         kpi(s.replies_7d, 'replies · 7d') +
-        kpi(s.sent_today + '<span style="color:var(--muted);font-size:13px">/' + s.daily_cap + '</span>', 'sent today');
+        kpi(s.sent_today + '<span style="color:var(--muted);font-size:13px">/' + s.daily_cap + '</span>', 'sent today') +
+        kpi('<span style="font-size:14px">' + cronVal + '</span>', 'cron tick', cronCol) +
+        kpi(errs, 'errors · 24h', errs ? 'var(--critical)' : 'var(--good)');
       var mode = $('b-mode');
       mode.textContent = s.dry_run ? 'DRY RUN' : 'LIVE';
       mode.className = 'badge ' + (s.dry_run ? 'dry' : 'live');

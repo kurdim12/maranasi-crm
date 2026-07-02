@@ -4,6 +4,7 @@ import { nowIso } from '../env';
 import { runCrmAgent } from '../agent/loop';
 import { markCallOutcome } from '../agent/tools';
 import { logActivity } from '../lib/activity';
+import { getHealth } from '../lib/health';
 import { getDailyCap, getSentToday, isSendingPaused, setSendingPaused } from '../lib/kvconf';
 import { verifyLead } from '../lib/verify';
 import { runScrape } from '../jobs/sourcing';
@@ -142,6 +143,7 @@ api.get('/stats', async (c) => {
     daily_cap: await getDailyCap(c.env),
     sending_paused: await isSendingPaused(c.env),
     dry_run: c.env.DRY_RUN !== 'false',
+    health: await getHealth(c.env),
   });
 });
 

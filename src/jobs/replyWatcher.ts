@@ -11,12 +11,54 @@ import {
   sendOwnerEmail,
   type ParsedMessage,
 } from '../lib/gmail';
+import { isSendingPaused, setSendingPaused } from '../lib/kvconf';
 import { transitionLead, type LeadStatus } from '../lib/stateMachine';
 import { CLASSIFIER_PROMPT } from '../prompts/classifier';
 
 export type ReplyClass = 'interested' | 'not_interested' | 'ooo' | 'bounce' | 'opt_out' | 'other';
 
 const CURSOR_KEY = 'gmail:historyId';
+
+// Deliverability circuit breaker: if the trailing-7-day bounce rate crosses
+// this threshold (with a minimum send volume so one bounce can't trip it),
+// sending auto-pauses and the owner is alerted. Resume is manual, from the
+// dashboard, after investigating.
+const BOUNCE_RATE_LIMIT = 0.03;
+const BOUNCE_MIN_SENDS = 20;
+
+export async function checkBounceCircuitBreaker(env: Env): Promise<{ tripped: boolean; rate: number; sent: number; bounces: number }> {
+  const db = env.DB;
+  const since = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+  const sent = (
+    await db
+      .prepare("SELECT COUNT(*) AS n FROM email_log WHERE direction = 'out' AND dry_run = 0 AND created_at >= ?")
+      .bind(since)
+      .first<{ n: number }>()
+  )?.n ?? 0;
+  const bounces = (
+    await db
+      .prepare("SELECT COUNT(*) AS n FROM email_log WHERE direction = 'in' AND classification = 'bounce' AND created_at >= ?")
+      .bind(since)
+      .first<{ n: number }>()
+  )?.n ?? 0;
+  const rate = sent > 0 ? bounces / sent : 0;
+  if (sent < BOUNCE_MIN_SENDS || rate <= BOUNCE_RATE_LIMIT) return { tripped: false, rate, sent, bounces };
+  if (await isSendingPaused(env)) return { tripped: true, rate, sent, bounces }; // already paused
+
+  await setSendingPaused(env, true);
+  await logActivity(db, 'system', 'auto_paused_bounce_rate', null, {
+    sent_7d: sent,
+    bounces_7d: bounces,
+    rate: Math.round(rate * 1000) / 10,
+    threshold_pct: BOUNCE_RATE_LIMIT * 100,
+  });
+  await sendOwnerEmail(
+    env,
+    `⚠ Sending auto-paused: bounce rate ${(rate * 100).toFixed(1)}%`,
+    `The trailing 7-day bounce rate hit ${(rate * 100).toFixed(1)}% (${bounces} bounces / ${sent} sends), above the ${BOUNCE_RATE_LIMIT * 100}% safety threshold.\n\nSending is now PAUSED. Before resuming from the dashboard:\n- check which domains bounced (Suppression tab, reason=bounce)\n- consider enabling the external verifier (VERIFIER_API_KEY)\n- re-verify the remaining queue\n\nResuming without fixing the list risks the sender domain's reputation.`,
+  );
+  return { tripped: true, rate, sent, bounces };
+}
 
 async function classifyReply(env: Env, subject: string, body: string): Promise<{ label: ReplyClass; summary: string }> {
   try {
@@ -136,6 +178,7 @@ async function applyClassification(
         });
       }
       if (lead.email) await addSuppression(db, lead.email, 'bounce');
+      await checkBounceCircuitBreaker(env);
       break;
     }
     case 'other': {

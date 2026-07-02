@@ -27,7 +27,9 @@ Would you be open to a short call to see if there is a fit?
 
 Best regards,
 {{sender_name}}
-Maranasi Events',
+Maranasi Events
+
+PS: If you would rather not hear from me, just reply "no thanks" and I will close your file.',
     1
   ),
   (
@@ -43,7 +45,9 @@ If partnerships are not your area, could you point me to the right person at {{c
 
 Best regards,
 {{sender_name}}
-Maranasi Events',
+Maranasi Events
+
+PS: If you would rather not hear from me, just reply "no thanks" and I will close your file.',
     1
   ),
   (
@@ -59,6 +63,8 @@ Either way, thanks for reading, and all the best with the season in {{city}}.
 
 Best regards,
 {{sender_name}}
-Maranasi Events',
+Maranasi Events
+
+PS: This is my last email unless you reply - no more follow-ups from me.',
     1
   );

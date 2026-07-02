@@ -29,18 +29,36 @@ export async function hasMxRecord(domain: string): Promise<boolean> {
 export type ExternalVerdict = 'deliverable' | 'undeliverable' | 'unknown';
 
 /**
- * Adapter for an external verification provider (ZeroBounce / NeverBounce).
- * The external call is stubbed: when VERIFIER_API_KEY is present this is where
- * the provider request goes; until then we return 'unknown' so syntax + MX
- * remain the deciding checks.
+ * External verification via ZeroBounce, active as soon as VERIFIER_API_KEY is
+ * set (MX-only verification passes catch-alls and dead mailboxes, which burns
+ * bounce budget). Any provider error degrades to 'unknown' — never blocks the
+ * pipeline on a third party.
  */
 export async function externalVerify(env: Env, email: string): Promise<ExternalVerdict> {
   if (!env.VERIFIER_API_KEY) return 'unknown';
-  // Plug a provider in here, e.g. ZeroBounce:
-  //   GET https://api.zerobounce.net/v2/validate?api_key=...&email=...
-  //   map status "valid" -> deliverable, "invalid"/"do_not_mail" -> undeliverable, else unknown
-  void email;
-  return 'unknown';
+  try {
+    const url =
+      'https://api.zerobounce.net/v2/validate?api_key=' +
+      encodeURIComponent(env.VERIFIER_API_KEY) +
+      '&email=' +
+      encodeURIComponent(email);
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return 'unknown';
+    const data = (await res.json()) as { status?: string };
+    switch (data.status) {
+      case 'valid':
+        return 'deliverable';
+      case 'invalid':
+      case 'spamtrap':
+      case 'abuse':
+      case 'do_not_mail':
+        return 'undeliverable';
+      default: // catch-all, unknown, greylisted...
+        return 'unknown';
+    }
+  } catch {
+    return 'unknown';
+  }
 }
 
 export interface VerifyResult {

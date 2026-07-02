@@ -3,7 +3,7 @@ import type { Env, Lead } from '../env';
 import { nowIso } from '../env';
 import { executeTool } from '../agent/tools';
 import { runDailyRecap } from '../jobs/recap';
-import { runReplyWatcher } from '../jobs/replyWatcher';
+import { checkBounceCircuitBreaker, runReplyWatcher } from '../jobs/replyWatcher';
 import { runSequenceEngine } from '../jobs/sequence';
 import { runScrape } from '../jobs/sourcing';
 
@@ -37,8 +37,10 @@ dev.post('/run/:job', async (c) => {
       return c.json(await runScrape(c.env, 'manual'));
     case 'recap':
       return c.json(await runDailyRecap(c.env));
+    case 'bounce-check':
+      return c.json(await checkBounceCircuitBreaker(c.env));
     default:
-      return c.json({ error: 'unknown job; use sequence | watcher | sourcing | recap' }, 400);
+      return c.json({ error: 'unknown job; use sequence | watcher | sourcing | recap | bounce-check' }, 400);
   }
 });
 

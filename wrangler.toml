@@ -1,5 +1,7 @@
 # Maranasi Outreach Engine — Cloudflare Worker
-name = "maranasi-outreach-engine"
+# Name matches the already-deployed Worker so `wrangler deploy` updates it
+# instead of creating a duplicate (two workers = two crons = double sends).
+name = "maranasi-crm"
 main = "src/index.ts"
 compatibility_date = "2025-09-01"
 compatibility_flags = ["nodejs_compat"]

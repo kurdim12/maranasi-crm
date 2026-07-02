@@ -238,6 +238,7 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
             subject,
             body: content.body,
             threadId,
+            listUnsubscribe: true,
             ...replyHeaders,
           });
           gmailMessageId = sent.id;
