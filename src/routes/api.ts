@@ -4,8 +4,12 @@ import { nowIso } from '../env';
 import { runCrmAgent } from '../agent/loop';
 import { markCallOutcome } from '../agent/tools';
 import { logActivity } from '../lib/activity';
+import { isManagedKey, listSettings, putSetting } from '../lib/config';
+import { gmailConfigured, gmailGetProfile } from '../lib/gmail';
 import { getHealth } from '../lib/health';
 import { getDailyCap, getSentToday, isSendingPaused, setSendingPaused } from '../lib/kvconf';
+import { llmProvider, llmText } from '../lib/llm';
+import { placesTextSearch } from '../lib/places';
 import { verifyLead } from '../lib/verify';
 import { runScrape } from '../jobs/sourcing';
 
@@ -231,6 +235,98 @@ api.delete('/suppression/:email', async (c) => {
   await c.env.DB.prepare('DELETE FROM suppression WHERE email = ?').bind(email).run();
   await logActivity(c.env.DB, 'owner', 'suppression_removed', null, { email });
   return c.json({ ok: true });
+});
+
+// ---- settings: dashboard-managed integration keys ----
+
+api.get('/settings', async (c) => {
+  return c.json({ settings: await listSettings(c.env) });
+});
+
+api.put('/settings/:key', async (c) => {
+  const key = c.req.param('key');
+  if (!isManagedKey(key)) return c.json({ error: 'unknown setting' }, 400);
+  const body = (await c.req.json().catch(() => ({}))) as { value?: string };
+  await putSetting(c.env, key, body.value ?? '');
+  await logActivity(c.env.DB, 'owner', 'setting_updated', null, {
+    key,
+    action: body.value?.trim() ? 'set' : 'cleared',
+  });
+  return c.json({ ok: true, key });
+});
+
+/**
+ * Live integration tests, run from the Worker (Cloudflare's network), so they
+ * validate exactly what production will use.
+ */
+api.post('/settings/test/:integration', async (c) => {
+  const which = c.req.param('integration');
+  try {
+    switch (which) {
+      case 'places': {
+        if (!c.env.GOOGLE_PLACES_API_KEY) return c.json({ ok: false, error: 'GOOGLE_PLACES_API_KEY is not set' });
+        const places = await placesTextSearch(c.env, 'coffee shop in Bangkok');
+        return c.json({ ok: true, detail: `Places API works — test query returned ${places.length} results.` });
+      }
+      case 'gmail': {
+        if (!gmailConfigured(c.env)) {
+          return c.json({ ok: false, error: 'Gmail is not connected (client id/secret/refresh token missing)' });
+        }
+        const profile = await gmailGetProfile(c.env);
+        return c.json({ ok: true, detail: `Connected as ${profile.emailAddress}.` });
+      }
+      case 'llm': {
+        const provider = llmProvider(c.env);
+        if (!provider) return c.json({ ok: false, error: 'no LLM key set (OPENROUTER_API_KEY or ANTHROPIC_API_KEY)' });
+        const reply = await llmText(c.env, 'fast', 'You reply with exactly: OK', 'ping', 10);
+        return c.json({ ok: true, detail: `${provider} works — model replied "${(reply ?? '').trim().slice(0, 40)}".` });
+      }
+      case 'verifier': {
+        if (!c.env.VERIFIER_API_KEY) return c.json({ ok: false, error: 'VERIFIER_API_KEY is not set' });
+        const res = await fetch(
+          `https://api.zerobounce.net/v2/getcredits?api_key=${encodeURIComponent(c.env.VERIFIER_API_KEY)}`,
+          { signal: AbortSignal.timeout(8000) },
+        );
+        const data = (await res.json()) as { Credits?: string };
+        const credits = Number(data.Credits ?? -1);
+        if (credits < 0) return c.json({ ok: false, error: 'ZeroBounce rejected the key' });
+        return c.json({ ok: true, detail: `ZeroBounce works — ${credits} credits remaining.` });
+      }
+      default:
+        return c.json({ error: 'unknown integration; use places | gmail | llm | verifier' }, 400);
+    }
+  } catch (err) {
+    return c.json({ ok: false, error: String(err).slice(0, 300) });
+  }
+});
+
+/** Start the Gmail OAuth connect flow (finished by GET /auth/gmail/callback). */
+api.post('/settings/gmail/start', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { client_id?: string; client_secret?: string };
+  const clientId = (body.client_id ?? '').trim() || c.env.GMAIL_CLIENT_ID;
+  const clientSecret = (body.client_secret ?? '').trim() || c.env.GMAIL_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return c.json({ error: 'client_id and client_secret required' }, 400);
+  await putSetting(c.env, 'GMAIL_CLIENT_ID', clientId);
+  await putSetting(c.env, 'GMAIL_CLIENT_SECRET', clientSecret);
+
+  const state = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  await c.env.KV.put(`gmailoauth:${state}`, '1', { expirationTtl: 600 });
+
+  const origin = new URL(c.req.url).origin;
+  const redirectUri = `${origin}/auth/gmail/callback`;
+  const url =
+    'https://accounts.google.com/o/oauth2/v2/auth?' +
+    new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly',
+      access_type: 'offline',
+      prompt: 'consent',
+      state,
+    }).toString();
+  await logActivity(c.env.DB, 'owner', 'gmail_oauth_started', null, {});
+  return c.json({ ok: true, url, redirect_uri: redirectUri });
 });
 
 // ---- dashboard user accounts ----

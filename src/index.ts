@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Env } from './env';
 import { dispatch } from './jobs/dispatcher';
 import { apiKeyAuth } from './lib/auth';
+import { withKvSecrets } from './lib/config';
 import { api } from './routes/api';
 import { auth } from './routes/auth';
 import { dev } from './routes/dev';
@@ -28,8 +29,12 @@ app.onError((err, c) => {
 });
 
 export default {
-  fetch: app.fetch,
+  // Resolve dashboard-managed settings (KV) into env once per invocation so
+  // downstream code reads plain env vars regardless of where a key was set.
+  async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+    return app.fetch(req, await withKvSecrets(env), ctx);
+  },
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(dispatch(env, event.scheduledTime));
+    ctx.waitUntil(withKvSecrets(env).then((resolved) => dispatch(resolved, event.scheduledTime)));
   },
 };

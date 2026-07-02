@@ -182,6 +182,7 @@ export const DASHBOARD_HTML = `<!doctype html>
         <button data-tab="suppression">Suppression</button>
         <button data-tab="runs">Scrape runs</button>
         <button data-tab="activity">Activity</button>
+        <button data-tab="settings">Settings</button>
       </nav>
       <div id="tabbody"></div>
     </div>
@@ -392,6 +393,91 @@ export const DASHBOARD_HTML = `<!doctype html>
     else if (tab === 'suppression') renderSuppressionTab();
     else if (tab === 'runs') renderRunsTab();
     else if (tab === 'activity') renderActivityTab();
+    else if (tab === 'settings') renderSettingsTab();
+  }
+
+  // ---------- settings ----------
+  var SETTING_HINTS = {
+    GOOGLE_PLACES_API_KEY: 'console.cloud.google.com → enable "Places API (New)" → Credentials → Create API key. Powers lead sourcing.',
+    VERIFIER_API_KEY: 'zerobounce.net API key (optional, recommended before real sending — protects bounce rate).',
+    RECAP_EMAIL: 'Where daily recaps, interested-reply alerts and failure alerts are sent.',
+    SENDER_EMAIL: 'The outreach inbox address (auto-filled by Gmail connect).',
+    SENDER_NAME: 'Display name on outgoing email, e.g. "Rami from Maranasi".',
+    GMAIL_CLIENT_ID: 'Managed by the Gmail connect flow above — rarely edited by hand.',
+    GMAIL_CLIENT_SECRET: 'Managed by the Gmail connect flow above.',
+    GMAIL_REFRESH_TOKEN: 'Created automatically when Gmail is connected.',
+    OPENROUTER_API_KEY: 'openrouter.ai/settings/keys — one key drives all AI features.',
+    OPENROUTER_MODEL_AGENT: 'Override the CRM-agent model slug (default anthropic/claude-sonnet-4.6).',
+    OPENROUTER_MODEL_FAST: 'Override the fast-model slug (default anthropic/claude-haiku-4.5).',
+    ANTHROPIC_API_KEY: 'Optional fallback provider — OpenRouter wins when both are set.'
+  };
+  function renderSettingsTab() {
+    $('tabbody').innerHTML = '<div class="empty">Loading…</div>';
+    req('GET', '/api/settings').then(function (data) {
+      var h = '';
+      h += '<div class="tpl"><div class="top"><b>Integration health</b></div>' +
+        '<div class="actions">' +
+          ['places', 'gmail', 'llm', 'verifier'].map(function (t) {
+            return '<button class="itest" data-t="' + t + '">Test ' + t + '</button>';
+          }).join('') +
+        '</div><div id="itest-out" style="margin-top:10px;color:var(--text2)"></div></div>';
+
+      h += '<div class="tpl"><div class="top"><b>Connect Gmail</b><span class="tag"><i style="background:var(--blue)"></i>guided</span></div>' +
+        '<div class="placeholders" style="margin-bottom:10px;line-height:1.8">' +
+          '1. In <b>console.cloud.google.com</b>: enable the <b>Gmail API</b>, set up the OAuth consent screen, then Credentials → Create OAuth client ID → type <b>Web application</b>.<br>' +
+          '2. Add this authorized redirect URI: <code id="gm-redirect"></code> <button id="gm-copy" style="padding:1px 8px">copy</button><br>' +
+          '3. Paste the client ID + secret here and press Connect — approve in the browser as the <b>outreach inbox</b>.' +
+        '</div>' +
+        '<input type="text" id="gm-id" placeholder="OAuth client ID">' +
+        '<input type="text" id="gm-secret" placeholder="OAuth client secret" style="margin-top:8px">' +
+        '<div class="foot"><button class="primary" id="gm-connect">Connect Gmail</button></div></div>';
+
+      h += '<table><thead><tr><th>Setting</th><th>Source</th><th>Value</th><th style="width:45%">Update</th></tr></thead><tbody>';
+      (data.settings || []).forEach(function (s) {
+        var srcCol = s.source === 'env' ? 'var(--good)' : s.source === 'dashboard' ? 'var(--blue)' : 'var(--muted)';
+        var srcLabel = s.source === 'env' ? 'secret' : s.source;
+        h += '<tr><td class="pri" title="' + esc(SETTING_HINTS[s.key] || '') + '">' + esc(s.key) + '</td>' +
+          '<td><span class="tag"><i style="background:' + srcCol + '"></i>' + srcLabel + '</span></td>' +
+          '<td>' + esc(s.preview || '—') + '</td>' +
+          '<td><div style="display:flex;gap:6px"><input type="text" class="set-in" data-key="' + s.key + '" placeholder="' +
+            (s.source === 'unset' ? 'paste value…' : 'paste new value (empty = clear)') + '" style="flex:1">' +
+          '<button class="set-save" data-key="' + s.key + '">Save</button></div>' +
+          '<div class="placeholders" style="margin-top:4px">' + esc(SETTING_HINTS[s.key] || '') + '</div></td></tr>';
+      });
+      h += '</tbody></table>';
+      h += '<div class="placeholders" style="margin:10px 0">Values saved here are stored in the Worker KV and take effect within ~20 seconds — no redeploy. A value set as an encrypted Worker secret (source: <b>secret</b>) always wins over a dashboard value.</div>';
+      $('tabbody').innerHTML = h;
+
+      $('gm-redirect').textContent = location.origin + '/auth/gmail/callback';
+      $('gm-copy').onclick = function () {
+        navigator.clipboard.writeText(location.origin + '/auth/gmail/callback').then(function () { toast('Redirect URI copied'); });
+      };
+      $('gm-connect').onclick = function () {
+        req('POST', '/api/settings/gmail/start', {
+          client_id: $('gm-id').value, client_secret: $('gm-secret').value
+        }).then(function (r) {
+          if (r.url) { toast('Opening Google consent…'); window.open(r.url, '_blank'); }
+        });
+      };
+      Array.prototype.forEach.call(document.querySelectorAll('.set-save'), function (b) {
+        b.onclick = function () {
+          var key = b.getAttribute('data-key');
+          var input = document.querySelector('.set-in[data-key="' + key + '"]');
+          req('PUT', '/api/settings/' + key, { value: input.value }).then(function () {
+            toast(key + ' saved'); renderSettingsTab();
+          });
+        };
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('.itest'), function (b) {
+        b.onclick = function () {
+          var t = b.getAttribute('data-t');
+          $('itest-out').textContent = 'Testing ' + t + '…';
+          req('POST', '/api/settings/test/' + t).then(function (r) {
+            $('itest-out').innerHTML = (r.ok ? '<span style="color:var(--good)">✓</span> ' : '<span style="color:var(--critical)">✗</span> ') + esc(r.detail || r.error || '');
+          }).catch(function () { $('itest-out').textContent = 'Test failed to run.'; });
+        };
+      });
+    });
   }
 
   // ---------- leads ----------

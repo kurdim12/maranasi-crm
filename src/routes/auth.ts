@@ -3,6 +3,7 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { Env } from '../env';
 import { nowIso } from '../env';
 import { logActivity } from '../lib/activity';
+import { putSetting } from '../lib/config';
 import {
   createSession,
   deleteSession,
@@ -89,6 +90,72 @@ auth.get('/me', async (c) => {
     return c.json({ ok: true, username: 'api-key', display_name: 'API key' });
   }
   return c.json({ error: 'unauthorized' }, 401);
+});
+
+/**
+ * Gmail OAuth redirect target. The flow starts from the dashboard Settings
+ * tab (POST /api/settings/gmail/start); Google redirects here with a code,
+ * which we exchange for a refresh token and store as a dashboard setting.
+ * Protected by the single-use state nonce created at start.
+ */
+auth.get('/gmail/callback', async (c) => {
+  const page = (title: string, body: string) =>
+    c.html(
+      `<!doctype html><html><body style="background:#131312;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="max-width:460px;background:#1a1a19;border:1px solid #33322f;border-radius:12px;padding:28px"><h2 style="margin:0 0 10px">${title}</h2><p style="color:#c3c2b7;line-height:1.6">${body}</p><p><a href="/" style="color:#3987e5">Back to the dashboard</a></p></div></body></html>`,
+    );
+
+  const state = c.req.query('state') ?? '';
+  const code = c.req.query('code');
+  const gError = c.req.query('error');
+  const valid = state && (await c.env.KV.get(`gmailoauth:${state}`));
+  if (!valid) return page('Connect failed', 'Invalid or expired sign-in state. Start again from Settings → Gmail.');
+  await c.env.KV.delete(`gmailoauth:${state}`);
+  if (gError || !code) return page('Connect failed', `Google returned: ${gError ?? 'no code'}. Start again from Settings.`);
+  if (!c.env.GMAIL_CLIENT_ID || !c.env.GMAIL_CLIENT_SECRET) {
+    return page('Connect failed', 'Client ID/secret missing — start again from Settings → Gmail.');
+  }
+
+  const redirectUri = `${new URL(c.req.url).origin}/auth/gmail/callback`;
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: c.env.GMAIL_CLIENT_ID,
+      client_secret: c.env.GMAIL_CLIENT_SECRET,
+      redirect_uri: redirectUri,
+      grant_type: 'authorization_code',
+    }),
+  });
+  const data = (await res.json()) as { refresh_token?: string; access_token?: string; error?: string };
+  if (!res.ok || !data.refresh_token) {
+    const hint = data.access_token
+      ? 'Google returned an access token but no refresh token — remove prior access at myaccount.google.com/permissions and connect again.'
+      : `Token exchange failed (${data.error ?? res.status}).`;
+    await logActivity(c.env.DB, 'system', 'gmail_oauth_failed', null, { error: data.error ?? res.status });
+    return page('Connect failed', hint);
+  }
+
+  await putSetting(c.env, 'GMAIL_REFRESH_TOKEN', data.refresh_token);
+  // Discover the connected inbox and default the sender address to it.
+  let inbox = '';
+  try {
+    const profRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+      headers: { authorization: `Bearer ${data.access_token}` },
+    });
+    const prof = (await profRes.json()) as { emailAddress?: string };
+    if (prof.emailAddress) {
+      inbox = prof.emailAddress;
+      if (!c.env.SENDER_EMAIL) await putSetting(c.env, 'SENDER_EMAIL', prof.emailAddress);
+    }
+  } catch {
+    // profile lookup is cosmetic; the refresh token is already stored
+  }
+  await logActivity(c.env.DB, 'owner', 'gmail_connected', null, { inbox });
+  return page(
+    'Gmail connected ✓',
+    `The outreach engine can now send and read email${inbox ? ` as <b>${inbox}</b>` : ''}. Set RECAP_EMAIL in Settings if you have not, then use the Test button to confirm.`,
+  );
 });
 
 /** Change own password (session login required). */
