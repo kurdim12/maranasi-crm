@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { assertDealTransition, DEAL_STAGES, IllegalDealTransition } from '../src/lib/dealMachine';
-import { triageForInbound } from '../src/lib/pipelineHooks';
+import { resolvedTriage, triageForInbound } from '../src/lib/pipelineHooks';
 
 describe('deal stage machine', () => {
   it('allows the forward path new → … → won', () => {
@@ -38,5 +38,10 @@ describe('inbox triage defaults', () => {
   it('routes machine mail to done', () => {
     expect(triageForInbound('ooo')).toBe('done');
     expect(triageForInbound('bounce')).toBe('done');
+  });
+  it("marking handled lands in 'waiting' only when we sent last", () => {
+    expect(resolvedTriage('out')).toBe('waiting');
+    expect(resolvedTriage('in')).toBe('done');
+    expect(resolvedTriage(null)).toBe('done');
   });
 });

@@ -54,3 +54,27 @@ export async function createTaskOnce(
 export function triageForInbound(classification: string | null): 'needs_reply' | 'done' {
   return classification === 'ooo' || classification === 'bounce' ? 'done' : 'needs_reply';
 }
+
+/**
+ * Where a handled thread lands: if the last message is OURS we're waiting on
+ * them; if theirs, the exchange is simply done.
+ */
+export function resolvedTriage(lastDirection: 'in' | 'out' | null): 'waiting' | 'done' {
+  return lastDirection === 'out' ? 'waiting' : 'done';
+}
+
+/** After we reply to a lead, its inbound queue items move to 'waiting'. */
+export async function markLeadReplied(db: D1Database, leadId: number, companyName: string): Promise<void> {
+  await db
+    .prepare("UPDATE email_log SET triage = 'waiting' WHERE lead_id = ? AND direction = 'in' AND triage = 'needs_reply'")
+    .bind(leadId)
+    .run();
+  const task = await db
+    .prepare("SELECT id FROM tasks WHERE lead_id = ? AND title = ? AND done_at IS NULL LIMIT 1")
+    .bind(leadId, `Reply to ${companyName}`)
+    .first<{ id: number }>();
+  if (task) {
+    await db.prepare("UPDATE tasks SET done_at = datetime('now') WHERE id = ?").bind(task.id).run();
+    await logActivity(db, 'system', 'task_completed', leadId, { task_id: task.id, via: 'reply_sent' });
+  }
+}

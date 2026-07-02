@@ -1,7 +1,6 @@
-// Inbox — the mail log (outreach sent + replies received). Ported 1:1 from
-// v1's Mail tab (renderMailTab / loadMail / classTag in dashboard.ts). The
-// triage rebuild lands in a later phase — this is zero behavior change.
-import { $, esc, req, chip, classChip, empty, skeletons } from './core.js';
+// Inbox v2 — triage console. Queues left, threads center, conversation right.
+// Keyboard: j/k move · enter open · r reply · e done · h snooze · esc back.
+import { $, esc, req, toast, chip, classChip, emptyHtml, skeletons, fmtDate } from './core.js';
 import { openLead, onLeadChange } from './drawer.js';
 
 export const id = 'inbox';
@@ -9,114 +8,253 @@ export const title = 'Inbox';
 export const icon = '▣';
 export const hotkey = 'i';
 
-let offset = 0;
-let rows = [];
+const QUEUES = [
+  { key: 'needs_reply', label: 'Needs reply' },
+  { key: 'waiting', label: 'Waiting' },
+  { key: 'done', label: 'Done' },
+  { key: 'snoozed', label: 'Snoozed' },
+  { key: 'sent', label: 'Sent' },
+];
+
+let queue = 'needs_reply';
+let kind = '';
+let threads = [];
 let sel = -1;
+let openThread = null; // lead_id currently open in the conversation pane
+let registered = false;
 
 export function render(root) {
-  offset = 0;
-  rows = [];
-  sel = -1;
   root.innerHTML = `
-    <div class="filters">
-      <select id="m-dir">
-        <option value="">all mail</option>
-        <option value="out">sent</option>
-        <option value="in">received</option>
-      </select>
-      <select id="m-kind">
-        <option value="">real + test</option>
-        <option value="real">real only</option>
-        <option value="test">test (dry run)</option>
-      </select>
-      <input type="text" id="m-q" placeholder="Search subject, body, company…">
-      <span class="grow"></span>
-      <span id="m-count" style="color:var(--t3)"></span>
-    </div>
-    <div class="card"><div id="mail-body">${skeletons(6)}</div></div>
-    <div style="margin-top:10px;text-align:center"><button id="m-more" style="display:none">Load more</button></div>
-  `;
-  ['m-dir', 'm-kind'].forEach((elId) => {
-    $(elId).addEventListener('change', () => { offset = 0; loadMail(false); });
+    <div class="inbox-wrap">
+      <aside class="inbox-rail" id="ib-rail"></aside>
+      <section class="inbox-list" id="ib-list">${skeletons(6)}</section>
+      <section class="inbox-conv" id="ib-conv">${emptyHtml('Select a thread — j/k to move, enter to open.')}</section>
+    </div>`;
+  if (!registered) { onLeadChange(() => { if ($('ib-list')) { load(); if (openThread) openConversation(openThread, true); } }); registered = true; }
+  renderRail({});
+  load();
+}
+
+function renderRail(counts) {
+  const rail = $('ib-rail');
+  if (!rail) return;
+  rail.innerHTML = QUEUES.map((q) => {
+    const n = counts[q.key];
+    return `<button class="rail-item${q.key === queue ? ' on' : ''}" data-q="${q.key}">
+      <span>${esc(q.label)}</span>${n ? `<span class="cnt mono">${n}</span>` : ''}</button>`;
+  }).join('') +
+    `<div class="rail-sep"></div>
+     <select id="ib-kind">
+       <option value="">real + test</option>
+       <option value="real"${kind === 'real' ? ' selected' : ''}>real only</option>
+       <option value="test"${kind === 'test' ? ' selected' : ''}>test (dry run)</option>
+     </select>
+     <div class="hint-bar" style="flex-direction:column;align-items:flex-start;gap:4px;margin-top:12px">
+       <span><span class="kbd">r</span> reply</span>
+       <span><span class="kbd">e</span> done</span>
+       <span><span class="kbd">h</span> snooze</span>
+     </div>`;
+  rail.querySelectorAll('.rail-item').forEach((b) => {
+    b.onclick = () => { queue = b.dataset.q; sel = -1; openThread = null; render(document.getElementById('view')); };
   });
-  $('m-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { offset = 0; loadMail(false); } });
-  $('m-more').addEventListener('click', () => { offset += 50; loadMail(true); });
-  loadMail(false);
+  const kindSel = $('ib-kind');
+  if (kindSel) kindSel.onchange = () => { kind = kindSel.value; load(); };
 }
 
-// Refresh the currently displayed page after a drawer edit — only if Inbox
-// is the mounted tab (guarded by the presence of our own DOM).
-onLeadChange(() => {
-  if ($('mail-body')) { offset = 0; loadMail(false); }
-});
+function load() {
+  const p = [`queue=${queue}`];
+  if (kind) p.push(`kind=${kind}`);
+  req('GET', `/api/inbox?${p.join('&')}`).then((d) => {
+    if (!$('ib-list')) return;
+    threads = d.threads || [];
+    renderRail(d.counts || {});
+    renderList();
+  }).catch(() => {});
+}
 
-function mailRowHtml(e) {
-  let badges = '';
-  if (e.direction === 'out') badges += chip(e.sequence_step ? `step ${e.sequence_step}` : 'manual');
-  if (e.dry_run) badges += chip('DRY RUN', 'var(--info)');
-  if (e.classification) badges += classChip(e.classification);
-  return `<div class="mailrow" data-lead="${esc(e.lead_id)}">
-    <span class="mdir ${e.direction === 'out' ? 'mout' : 'min'}">${e.direction === 'out' ? '↑' : '↓'}</span>
-    <div class="mmain">
-      <div class="mtop"><b>${esc(e.subject || '(no subject)')}</b>${badges}</div>
-      <div class="msub">${esc(e.company_name)}${e.lead_email ? ' · ' + esc(e.lead_email) : ''}</div>
-      <div class="msnip">${esc((e.snippet || '').replace(/\s+/g, ' '))}</div>
+function renderList() {
+  const list = $('ib-list');
+  if (!list) return;
+  if (!threads.length) {
+    const msgs = {
+      needs_reply: 'Inbox zero — nothing needs a reply.',
+      waiting: 'Not waiting on anyone.',
+      done: 'Nothing archived yet.',
+      snoozed: 'Nothing snoozed.',
+      sent: 'No sent mail in this filter.',
+    };
+    list.innerHTML = emptyHtml(msgs[queue] || 'Empty.');
+    return;
+  }
+  list.innerHTML = threads.map((t, i) => `
+    <div class="mailrow${i === sel ? ' sel-row' : ''}" data-i="${i}">
+      <span class="mdir ${t.direction === 'out' ? 'mout' : 'min'}">${t.direction === 'out' ? '↑' : '↓'}</span>
+      <div class="mmain">
+        <div class="mtop"><b>${esc(t.subject || '(no subject)')}</b>
+          ${t.classification ? classChip(t.classification) : ''}
+          ${t.dry_run && t.direction === 'out' ? chip('DRY RUN', 'var(--info)') : ''}
+          ${t.snoozed_until ? chip('until ' + fmtDate(t.snoozed_until)) : ''}
+        </div>
+        <div class="msub">${esc(t.company_name)} · ${esc(t.lead_email || '')}</div>
+        <div class="msnip">${esc((t.snippet || '').replace(/\s+/g, ' '))}</div>
+      </div>
+      <span class="mtime">${esc(fmtDate(t.created_at))}</span>
+    </div>`).join('');
+  list.querySelectorAll('.mailrow').forEach((row) => {
+    row.onclick = () => { sel = +row.dataset.i; renderList(); openConversation(threads[sel].lead_id); };
+  });
+}
+
+function openConversation(leadId, keepScroll) {
+  openThread = leadId;
+  const conv = $('ib-conv');
+  if (!conv) return;
+  if (!keepScroll) conv.innerHTML = skeletons(4);
+  req('GET', `/api/leads/${leadId}`).then((data) => {
+    if (!$('ib-conv') || openThread !== leadId) return;
+    const l = data.lead;
+    const emails = (data.emails || []).slice().reverse(); // oldest first
+    let h = `<div class="conv-head">
+      <div><b>${esc(l.company_name)}</b> <span class="mono" style="color:var(--t3)">${esc(l.email || '')}</span></div>
+      <div class="actions">
+        <button class="ghost" id="cv-lead">Lead ↗</button>
+        ${queue === 'needs_reply' ? '<button id="cv-done" title="e">✓ Done</button><button id="cv-snooze" title="h">Snooze</button>' : ''}
+      </div>
     </div>
-    <span class="mtime num">${esc((e.created_at || '').slice(0, 16))}</span>
-  </div>`;
-}
-
-function loadMail(append) {
-  const p = ['limit=50', `offset=${offset}`];
-  if ($('m-dir').value) p.push(`direction=${$('m-dir').value}`);
-  if ($('m-kind').value) p.push(`kind=${$('m-kind').value}`);
-  if ($('m-q').value) p.push(`q=${encodeURIComponent($('m-q').value)}`);
-  req('GET', `/api/emails?${p.join('&')}`).then((data) => {
-    if (!$('mail-body')) return; // tab changed while in flight
-    const emails = data.emails || [];
-    rows = append ? rows.concat(emails) : emails;
-    if (!append) sel = -1;
-    const html = emails.map(mailRowHtml).join('');
-    if (!append) {
-      $('mail-body').innerHTML = '';
-      if (html) $('mail-body').innerHTML = html;
-      else {
-        $('mail-body').appendChild(
-          empty('No mail yet. Outreach the sequence engine sends — and replies the watcher pulls in — all land here.'),
-        );
-      }
-    } else {
-      $('mail-body').insertAdjacentHTML('beforeend', html);
+    <div class="conv-log" id="cv-log">`;
+    for (const e of emails) {
+      h += `<div class="bubble ${e.direction === 'out' ? 'b-out' : 'b-in'}">
+        <div class="b-meta mono">${e.direction === 'out' ? '↑ us' : '↓ them'} · ${esc(fmtDate(e.created_at))}${
+          e.sequence_step ? ` · step ${e.sequence_step}` : ''
+        }${e.dry_run && e.direction === 'out' ? ' · DRY RUN' : ''}${
+          e.classification ? ` · ${esc(e.classification)}` : ''
+        }</div>
+        <b>${esc(e.subject || '(no subject)')}</b>
+        <pre>${esc((e.body || '').slice(0, 3000))}</pre>
+      </div>`;
     }
-    $('m-count').textContent = `${data.total} message${data.total === 1 ? '' : 's'}`;
-    $('m-more').style.display = offset + 50 < data.total ? '' : 'none';
-    wireRows();
-    applySel();
+    h += '</div>';
+
+    if (l.email) {
+      const lastSubject = (data.emails || []).find((e) => e.subject)?.subject || '';
+      const replySubject = lastSubject ? (lastSubject.startsWith('Re:') ? lastSubject : `Re: ${lastSubject}`) : '';
+      h += `<div class="conv-compose">
+        <div class="frow" style="margin-bottom:6px"><label>subject</label><input id="cv-subject" value="${esc(replySubject)}"></div>
+        <textarea id="cv-body" rows="5" placeholder="Write your reply… (r focuses here)"></textarea>
+        <div class="actions" style="margin-top:8px">
+          <button class="primary" id="cv-send">Send reply</button>
+          <span class="seg" id="cv-tone"><button class="on" data-t="warm">warm</button><button data-t="direct">direct</button></span>
+          <button id="cv-draft">✦ AI draft</button>
+        </div>
+      </div>`;
+    }
+    conv.innerHTML = h;
+    const log = $('cv-log');
+    if (log) log.scrollTop = log.scrollHeight;
+
+    $('cv-lead').onclick = () => openLead(leadId);
+    let tone = 'warm';
+    const toneSeg = $('cv-tone');
+    if (toneSeg) toneSeg.querySelectorAll('button').forEach((b) => {
+      b.onclick = () => { toneSeg.querySelectorAll('button').forEach((x) => (x.className = '')); b.className = 'on'; tone = b.dataset.t; };
+    });
+    const draftBtn = $('cv-draft');
+    if (draftBtn) draftBtn.onclick = () => {
+      draftBtn.disabled = true;
+      draftBtn.textContent = 'drafting…';
+      req('POST', `/api/leads/${leadId}/draft`, { tone })
+        .then((r) => { $('cv-body').value = r.draft || ''; })
+        .catch(() => {})
+        .finally(() => { draftBtn.disabled = false; draftBtn.textContent = '✦ AI draft'; });
+    };
+    const sendBtn = $('cv-send');
+    if (sendBtn) sendBtn.onclick = () => {
+      const subject = $('cv-subject').value.trim();
+      const bodyText = $('cv-body').value.trim();
+      if (!subject || !bodyText) { toast('Subject and body required', 'err'); return; }
+      if (!window.confirm(`Send this email to ${l.email} now? This is a REAL send.`)) return;
+      sendBtn.disabled = true;
+      req('POST', `/api/leads/${leadId}/email`, { subject, body: bodyText })
+        .then(() => { toast(`Sent to ${l.email}`, 'ok'); load(); openConversation(leadId, true); })
+        .catch(() => { sendBtn.disabled = false; });
+    };
+    const doneBtn = $('cv-done');
+    if (doneBtn) doneBtn.onclick = () => markDone(leadId);
+    const snoozeBtn = $('cv-snooze');
+    if (snoozeBtn) snoozeBtn.onclick = () => snooze(leadId);
+  }).catch(() => {});
+}
+
+function currentEmailId(leadId) {
+  const t = threads.find((x) => x.lead_id === leadId);
+  return t ? t.id : null;
+}
+
+function markDone(leadId) {
+  const emailId = currentEmailId(leadId);
+  if (!emailId) return;
+  req('POST', `/api/emails/${emailId}/triage`, { action: 'done' }).then((r) => {
+    toast(r.triage === 'waiting' ? 'Moved to Waiting (we sent last)' : 'Done', 'ok');
+    openThread = null;
+    sel = -1;
+    $('ib-conv').innerHTML = emptyHtml('Handled. Next: j/k + enter.');
+    load();
   });
 }
 
-function wireRows() {
-  const body = $('mail-body');
-  if (!body) return;
-  body.querySelectorAll('.mailrow[data-lead]').forEach((el) => {
-    el.onclick = () => openLead(el.getAttribute('data-lead'));
+function snooze(leadId) {
+  const emailId = currentEmailId(leadId);
+  if (!emailId) return;
+  const pick = window.prompt('Snooze for how long? 1d / 3d / or a date (YYYY-MM-DD)', '1d');
+  if (!pick) return;
+  let until;
+  const m = pick.trim().match(/^(\d+)d$/i);
+  if (m) {
+    const dt = new Date(Date.now() + parseInt(m[1], 10) * 86400000);
+    until = dt.toISOString().slice(0, 19).replace('T', ' ');
+  } else if (!Number.isNaN(Date.parse(pick))) {
+    until = `${pick.trim().slice(0, 10)} 06:00:00`;
+  } else { toast('Use 1d, 3d, or YYYY-MM-DD', 'err'); return; }
+  req('POST', `/api/emails/${emailId}/triage`, { action: 'snooze', until }).then(() => {
+    toast(`Snoozed until ${until.slice(0, 10)}`, 'ok');
+    openThread = null;
+    sel = -1;
+    $('ib-conv').innerHTML = emptyHtml('Snoozed. It returns to Needs reply when time is up.');
+    load();
   });
 }
 
-function applySel() {
-  const body = $('mail-body');
-  if (!body) return;
-  const els = body.querySelectorAll('.mailrow');
-  els.forEach((el, i) => { el.style.background = i === sel ? 'var(--bg2)' : ''; });
-  if (sel >= 0 && els[sel]) els[sel].scrollIntoView({ block: 'nearest' });
-}
-
-export function keys(k, e) {
-  if (!rows.length) return false;
-  if (k === 'j') { sel = Math.min(rows.length - 1, sel + 1); applySel(); return true; }
-  if (k === 'k') { sel = Math.max(0, sel - 1); applySel(); return true; }
+export function keys(k) {
+  if (k === 'j' || k === 'k') {
+    if (!threads.length) return true;
+    sel = Math.max(0, Math.min(threads.length - 1, sel + (k === 'j' ? 1 : -1)));
+    renderList();
+    const row = document.querySelector(`.mailrow[data-i="${sel}"]`);
+    if (row) row.scrollIntoView({ block: 'nearest' });
+    return true;
+  }
   if (k === 'enter') {
-    if (sel >= 0 && rows[sel]) openLead(rows[sel].lead_id);
+    if (sel >= 0) openConversation(threads[sel].lead_id);
+    return true;
+  }
+  if (k === 'r') {
+    const box = $('cv-body');
+    if (box) { box.focus(); return true; }
+    if (sel >= 0) {
+      openConversation(threads[sel].lead_id);
+      setTimeout(() => { const b = $('cv-body'); if (b) b.focus(); }, 700);
+      return true;
+    }
+    return false;
+  }
+  if (k === 'e' && queue === 'needs_reply') {
+    const target = openThread || (sel >= 0 ? threads[sel].lead_id : null);
+    if (target) markDone(target);
+    return true;
+  }
+  if (k === 'h' && queue === 'needs_reply') {
+    const target = openThread || (sel >= 0 ? threads[sel].lead_id : null);
+    if (target) snooze(target);
     return true;
   }
   return false;
