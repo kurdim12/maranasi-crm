@@ -21,8 +21,12 @@ Workers (Hono + D1 + KV) with one cron trigger and an internal dispatcher.
   - :00 / :30 → Sequence Engine
   - 01:00 UTC → Sourcing (daily scrape)
   - 03:30 UTC → Daily Recap (06:30 Amman)
-- Claude API: `claude-sonnet-4-6` (CRM agent, recap), `claude-haiku-4-5-20251001`
-  (personalization, reply classification)
+- LLM: **OpenRouter** with one `OPENROUTER_API_KEY` secret (models
+  `anthropic/claude-sonnet-4.6` for the CRM agent + recap,
+  `anthropic/claude-haiku-4.5` for personalization + reply classification;
+  override with `OPENROUTER_MODEL_AGENT` / `OPENROUTER_MODEL_FAST`).
+  Setting `ANTHROPIC_API_KEY` instead uses the Anthropic API directly —
+  OpenRouter wins when both are set.
 - Gmail API (OAuth refresh token) for sending and reading replies
 - Google Places API (New) for lead sourcing
 
@@ -40,7 +44,7 @@ npm run migrate:local                   # local dev schema (remote is already mi
 
 # secrets (production)
 wrangler secret put ADMIN_API_KEY
-wrangler secret put ANTHROPIC_API_KEY
+wrangler secret put OPENROUTER_API_KEY      # one key for all LLM calls
 wrangler secret put GOOGLE_PLACES_API_KEY
 # Gmail secrets: see scripts/gmail-auth.md
 

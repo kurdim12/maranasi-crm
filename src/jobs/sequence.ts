@@ -1,7 +1,7 @@
 import type { Env, Lead } from '../env';
 import { isDryRun, isoPlus, nowIso } from '../env';
 import { logActivity, logError } from '../lib/activity';
-import { claudeClient, MODEL_FAST, parseJsonLoose, textOf } from '../lib/anthropic';
+import { llmText, parseJsonLoose } from '../lib/llm';
 import { GmailSendError, gmailConfigured, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
 import { getDailyCap, getSentToday, incrementSentToday, isSendingPaused } from '../lib/kvconf';
 import { assertTransition, type LeadStatus } from '../lib/stateMachine';
@@ -48,34 +48,26 @@ async function personalize(
     body: fillTemplate(template.body_template, lead, env),
     personalized: false,
   };
-  const client = claudeClient(env);
-  if (!client) return fallback;
   try {
-    const msg = await client.messages.create({
-      model: MODEL_FAST,
-      max_tokens: 1024,
-      system: PERSONALIZER_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: JSON.stringify({
-            template: {
-              subject: fillTemplate(template.subject_template, lead, env),
-              body: fillTemplate(template.body_template, lead, env),
-            },
-            lead: {
-              company_name: lead.company_name,
-              city: lead.city,
-              country: lead.country,
-              category: lead.category,
-              contact_name: lead.contact_name,
-              website: lead.website,
-            },
-          }),
+    const raw = await llmText(
+      env,
+      'fast',
+      PERSONALIZER_PROMPT,
+      JSON.stringify({
+        template: { subject: fallback.subject, body: fallback.body },
+        lead: {
+          company_name: lead.company_name,
+          city: lead.city,
+          country: lead.country,
+          category: lead.category,
+          contact_name: lead.contact_name,
+          website: lead.website,
         },
-      ],
-    });
-    const parsed = parseJsonLoose<{ subject: string; body: string }>(textOf(msg));
+      }),
+      1024,
+    );
+    if (raw === null) return fallback; // no LLM provider configured
+    const parsed = parseJsonLoose<{ subject: string; body: string }>(raw);
     if (parsed?.subject && parsed?.body) {
       return { subject: parsed.subject, body: parsed.body, personalized: true };
     }

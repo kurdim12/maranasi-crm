@@ -1,7 +1,7 @@
 import type { Env, Lead } from '../env';
 import { nowIso } from '../env';
 import { logActivity, logError } from '../lib/activity';
-import { claudeClient, MODEL_FAST, parseJsonLoose, textOf } from '../lib/anthropic';
+import { llmText, parseJsonLoose } from '../lib/llm';
 import {
   gmailConfigured,
   gmailGetMessage,
@@ -19,18 +19,16 @@ export type ReplyClass = 'interested' | 'not_interested' | 'ooo' | 'bounce' | 'o
 const CURSOR_KEY = 'gmail:historyId';
 
 async function classifyReply(env: Env, subject: string, body: string): Promise<{ label: ReplyClass; summary: string }> {
-  const client = claudeClient(env);
-  if (!client) return { label: 'other', summary: 'classifier unavailable (no API key)' };
   try {
-    const msg = await client.messages.create({
-      model: MODEL_FAST,
-      max_tokens: 256,
-      system: CLASSIFIER_PROMPT,
-      messages: [
-        { role: 'user', content: `Subject: ${subject}\n\nReply:\n${body.slice(0, 6000)}` },
-      ],
-    });
-    const parsed = parseJsonLoose<{ label: string; confidence: number; summary: string }>(textOf(msg));
+    const raw = await llmText(
+      env,
+      'fast',
+      CLASSIFIER_PROMPT,
+      `Subject: ${subject}\n\nReply:\n${body.slice(0, 6000)}`,
+      256,
+    );
+    if (raw === null) return { label: 'other', summary: 'classifier unavailable (no LLM provider configured)' };
+    const parsed = parseJsonLoose<{ label: string; confidence: number; summary: string }>(raw);
     const valid: ReplyClass[] = ['interested', 'not_interested', 'ooo', 'bounce', 'opt_out', 'other'];
     if (parsed && valid.includes(parsed.label as ReplyClass)) {
       return { label: parsed.label as ReplyClass, summary: parsed.summary ?? '' };

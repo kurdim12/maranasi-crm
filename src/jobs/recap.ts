@@ -1,6 +1,6 @@
 import type { Env } from '../env';
 import { logActivity, logError } from '../lib/activity';
-import { claudeClient, MODEL_AGENT, parseJsonLoose, textOf } from '../lib/anthropic';
+import { llmText, parseJsonLoose } from '../lib/llm';
 import { sendOwnerEmail } from '../lib/gmail';
 import { getDailyCap, getSentToday } from '../lib/kvconf';
 import { RECAP_PROMPT } from '../prompts/recap';
@@ -136,20 +136,14 @@ export async function runDailyRecap(env: Env): Promise<{ sent: boolean }> {
     const data = await gatherRecapData(env);
     let email = plainRecap(data);
 
-    const client = claudeClient(env);
-    if (client) {
-      try {
-        const msg = await client.messages.create({
-          model: MODEL_AGENT,
-          max_tokens: 1024,
-          system: RECAP_PROMPT,
-          messages: [{ role: 'user', content: JSON.stringify(data) }],
-        });
-        const parsed = parseJsonLoose<{ subject: string; body: string }>(textOf(msg));
+    try {
+      const raw = await llmText(env, 'agent', RECAP_PROMPT, JSON.stringify(data), 1024);
+      if (raw !== null) {
+        const parsed = parseJsonLoose<{ subject: string; body: string }>(raw);
         if (parsed?.subject && parsed?.body) email = parsed;
-      } catch (err) {
-        await logError(db, 'recap writer', err);
       }
+    } catch (err) {
+      await logError(db, 'recap writer', err);
     }
 
     // Recap always sends for real, even in DRY_RUN (no lead-facing content).

@@ -1,13 +1,13 @@
-import type Anthropic from '@anthropic-ai/sdk';
 import type { Env, Lead } from '../env';
 import { nowIso } from '../env';
 import { logActivity, type Actor } from '../lib/activity';
+import type { ToolSpec } from '../lib/llm';
 import { IllegalTransitionError, transitionLead } from '../lib/stateMachine';
 
 // Every CRM-agent tool is a thin function over D1; all writes are recorded in
 // the activities audit table with actor='crm_agent'.
 
-export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
+export const TOOL_DEFINITIONS: ToolSpec[] = [
   {
     name: 'search_leads',
     description:

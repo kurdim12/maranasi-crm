@@ -1,5 +1,4 @@
 import { Hono } from 'hono';
-import type Anthropic from '@anthropic-ai/sdk';
 import type { Env, Lead } from '../env';
 import { nowIso } from '../env';
 import { runCrmAgent } from '../agent/loop';
@@ -161,9 +160,87 @@ api.post('/sending/resume', async (c) => {
 api.post('/agent', async (c) => {
   const body = (await c.req.json().catch(() => null)) as {
     message?: string;
-    history?: Anthropic.MessageParam[];
+    history?: unknown[];
   } | null;
   if (!body?.message) return c.json({ error: 'message required' }, 400);
   const result = await runCrmAgent(c.env, body.message, Array.isArray(body.history) ? body.history : []);
   return c.json(result);
+});
+
+// ---- templates (the owner must be able to replace placeholder copy) ----
+
+api.get('/templates', async (c) => {
+  const rows = await c.env.DB.prepare('SELECT * FROM templates ORDER BY sequence_step, id').all();
+  return c.json({ templates: rows.results });
+});
+
+api.put('/templates/:id', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const existing = await c.env.DB.prepare('SELECT id FROM templates WHERE id = ?').bind(id).first();
+  if (!existing) return c.json({ error: 'not found' }, 404);
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) return c.json({ error: 'invalid JSON body' }, 400);
+  const whitelist = ['name', 'subject_template', 'body_template', 'active'];
+  const accepted = Object.entries(body).filter(([k]) => whitelist.includes(k));
+  if (!accepted.length) return c.json({ error: 'no editable fields', whitelist }, 400);
+  const sets = accepted.map(([k]) => `${k} = ?`).join(', ');
+  await c.env.DB.prepare(`UPDATE templates SET ${sets} WHERE id = ?`)
+    .bind(...accepted.map(([, v]) => v), id)
+    .run();
+  await logActivity(c.env.DB, 'owner', 'template_updated', null, {
+    template_id: id,
+    fields: accepted.map(([k]) => k),
+  });
+  return c.json({ ok: true });
+});
+
+// ---- suppression list ----
+
+api.get('/suppression', async (c) => {
+  const rows = await c.env.DB.prepare('SELECT * FROM suppression ORDER BY created_at DESC LIMIT 500').all();
+  return c.json({ suppression: rows.results });
+});
+
+api.post('/suppression', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { email?: string };
+  const email = (body.email ?? '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return c.json({ error: 'valid email required' }, 400);
+  await c.env.DB.prepare(
+    "INSERT INTO suppression (email, domain, reason) VALUES (?, ?, 'manual') ON CONFLICT(email) DO NOTHING",
+  )
+    .bind(email, email.split('@')[1])
+    .run();
+  await logActivity(c.env.DB, 'owner', 'suppression_added', null, { email, reason: 'manual' });
+  return c.json({ ok: true, email });
+});
+
+api.delete('/suppression/:email', async (c) => {
+  const email = decodeURIComponent(c.req.param('email')).toLowerCase();
+  const row = await c.env.DB.prepare('SELECT reason FROM suppression WHERE email = ?')
+    .bind(email)
+    .first<{ reason: string }>();
+  if (!row) return c.json({ error: 'not found' }, 404);
+  if (row.reason !== 'manual') {
+    return c.json(
+      { error: `only manual entries can be removed; this one is '${row.reason}' (opt-outs and bounces are permanent)` },
+      403,
+    );
+  }
+  await c.env.DB.prepare('DELETE FROM suppression WHERE email = ?').bind(email).run();
+  await logActivity(c.env.DB, 'owner', 'suppression_removed', null, { email });
+  return c.json({ ok: true });
+});
+
+// ---- recent activity feed ----
+
+api.get('/activities', async (c) => {
+  const limit = Math.min(parseInt(c.req.query('limit') ?? '100', 10) || 100, 300);
+  const rows = await c.env.DB.prepare(
+    `SELECT a.id, a.actor, a.action, a.lead_id, a.detail, a.created_at, l.company_name
+     FROM activities a LEFT JOIN leads l ON l.id = a.lead_id
+     ORDER BY a.id DESC LIMIT ?`,
+  )
+    .bind(limit)
+    .all();
+  return c.json({ activities: rows.results });
 });

@@ -23,6 +23,11 @@ binding = "KV"
 id = "35de807c8d26456292f0852508e0595d"
 
 # Secrets (set with `wrangler secret put <NAME>`):
-#   ANTHROPIC_API_KEY, ADMIN_API_KEY, GOOGLE_PLACES_API_KEY,
+#   ADMIN_API_KEY
+#   OPENROUTER_API_KEY            <- one key drives all LLM calls (preferred)
+#   ANTHROPIC_API_KEY             <- optional fallback provider (Anthropic direct)
+#   GOOGLE_PLACES_API_KEY,
 #   GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN,
 #   RECAP_EMAIL, SENDER_EMAIL, SENDER_NAME, VERIFIER_API_KEY (optional)
+# Optional vars: OPENROUTER_MODEL_AGENT (default anthropic/claude-sonnet-4.6),
+#                OPENROUTER_MODEL_FAST  (default anthropic/claude-haiku-4.5)
