@@ -114,8 +114,19 @@ function renderTemplates() {
         <input type="text" class="t-subject" value="${esc(t.subject_template)}" placeholder="Subject">
         <textarea class="t-body">${esc(t.body_template)}</textarea>
         <div class="foot"><button class="primary t-save">Save template</button>
+        <button class="ghost t-variant">+ A/B variant</button>
         ${(t.body_template || '').indexOf('PLACEHOLDER') !== -1 ? chip('placeholder copy — replace before go-live', 'var(--warn)') : ''}
-        </div></div>`;
+        </div>
+        ${(t.variants || []).map((v) => `
+          <div style="border-top:1px solid var(--line);margin-top:10px;padding-top:10px">
+            <div class="top">${chip(`variant ${esc(v.label)}`, 'var(--info)')}<span class="mono" style="color:var(--t2)">${esc(v.subject_template)}</span>
+              <span style="margin-left:auto;display:flex;gap:6px">
+                <button class="good v-promote" data-v="${v.id}">Promote winner</button>
+                <button class="danger v-retire" data-v="${v.id}">Retire</button>
+              </span></div>
+            <pre style="white-space:pre-wrap;font:12px/1.5 var(--font-mono);color:var(--t3);margin:6px 0 0;max-height:120px;overflow:auto">${esc(v.body_template)}</pre>
+          </div>`).join('')}
+        </div>`;
     });
     h += `<div class="tpl"><div class="top">${chip('channels', 'var(--info)')}<b>Chat intro messages (WhatsApp · Zalo · Line)</b></div>
       <div class="placeholders" style="margin-bottom:8px">Prefilled when you open a channel from a lead — manual send only, same {{placeholders}}.</div>
@@ -133,6 +144,29 @@ function renderTemplates() {
           active: el.querySelector('.t-active').checked ? 1 : 0,
         }).then(() => { toast('Template saved', 'ok'); renderTemplates(); });
       };
+    });
+    $('sys-body').querySelectorAll('.t-variant').forEach((b) => {
+      b.onclick = () => {
+        const el = b.closest('.tpl');
+        req('POST', `/api/templates/${el.getAttribute('data-id')}/variants`, {
+          subject_template: el.querySelector('.t-subject').value,
+          body_template: el.querySelector('.t-body').value,
+        }).then((r) => { toast(`Variant ${r.label} created — edit it, then let the split run`, 'ok'); renderTemplates(); });
+      };
+    });
+    $('sys-body').querySelectorAll('.v-promote').forEach((b) => {
+      b.onclick = async () => {
+        const go = await confirmModal({
+          title: 'Promote this variant?',
+          message: 'Its copy replaces the base template and the experiment ends (all variants retire).',
+          confirmLabel: 'Promote',
+        });
+        if (!go) return;
+        req('POST', `/api/template-variants/${b.dataset.v}/promote`).then((r) => { toast(`Variant ${r.promoted} promoted`, 'ok'); renderTemplates(); });
+      };
+    });
+    $('sys-body').querySelectorAll('.v-retire').forEach((b) => {
+      b.onclick = () => req('DELETE', `/api/template-variants/${b.dataset.v}`).then(() => { toast('Variant retired'); renderTemplates(); });
     });
     $('ch-save').onclick = () => {
       const templates = {};

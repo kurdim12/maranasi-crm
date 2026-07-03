@@ -118,6 +118,30 @@ export async function previewNextEmail(
   return { ok: true, step, subject: content.subject, body: content.body, personalized: content.personalized };
 }
 
+/**
+ * A/B variant pick for a step template. The base row is implicitly variant
+ * 'A'; template_variants rows (active=1) compete with it at equal odds.
+ */
+export async function pickVariant(
+  db: D1Database,
+  base: TemplateRow,
+): Promise<{ template: TemplateRow; variantLabel: string }> {
+  const variants = await db
+    .prepare('SELECT * FROM template_variants WHERE template_id = ? AND active = 1 ORDER BY id')
+    .bind(base.id)
+    .all<{ id: number; label: string; subject_template: string; body_template: string }>();
+  if (!variants.results.length) return { template: base, variantLabel: 'A' };
+  const pool = [
+    { label: 'A', subject: base.subject_template, body: base.body_template },
+    ...variants.results.map((v) => ({ label: v.label, subject: v.subject_template, body: v.body_template })),
+  ];
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  return {
+    template: { ...base, subject_template: pick.subject, body_template: pick.body },
+    variantLabel: pick.label,
+  };
+}
+
 /** Flag leads whose 3-step sequence ran dry: NEVER dropped, only flagged. */
 async function flagExhaustedLeads(env: Env): Promise<number> {
   const db = env.DB;
@@ -207,15 +231,18 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
       }
 
       const step = lead.sequence_step + 1;
-      const template = await db
+      const baseTemplate = await db
         .prepare('SELECT * FROM templates WHERE sequence_step = ? AND active = 1 ORDER BY id LIMIT 1')
         .bind(step)
         .first<TemplateRow>();
-      if (!template) {
+      if (!baseTemplate) {
         stats.skipped.other++;
         await logActivity(db, 'system', 'send_skipped', lead.id, { reason: `no active template for step ${step}` });
         continue;
       }
+      // A/B: the base template is variant 'A'; active rows in template_variants
+      // are challengers. Pick uniformly at random, stamp the label on the log.
+      const { template, variantLabel } = await pickVariant(db, baseTemplate);
 
       if (!dryRun && !gmailConfigured(env)) {
         stats.skipped.other++;
@@ -293,10 +320,10 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
             // what was (maybe) sent, and flag it for the owner.
             await db
               .prepare(
-                `INSERT INTO email_log (lead_id, direction, sequence_step, subject, body, gmail_message_id, gmail_thread_id, dry_run)
-                 VALUES (?, 'out', ?, ?, ?, NULL, NULL, 0)`,
+                `INSERT INTO email_log (lead_id, direction, sequence_step, subject, body, gmail_message_id, gmail_thread_id, dry_run, variant_label)
+                 VALUES (?, 'out', ?, ?, ?, NULL, NULL, 0, ?)`,
               )
-              .bind(lead.id, step, subject, content.body)
+              .bind(lead.id, step, subject, content.body, variantLabel)
               .run();
             await logActivity(db, 'system', 'send_uncertain', lead.id, {
               step,
@@ -334,8 +361,8 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
 
       await db
         .prepare(
-          `INSERT INTO email_log (lead_id, direction, sequence_step, subject, body, gmail_message_id, gmail_thread_id, dry_run)
-           VALUES (?, 'out', ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO email_log (lead_id, direction, sequence_step, subject, body, gmail_message_id, gmail_thread_id, dry_run, variant_label)
+           VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(lead.id, step, subject, content.body, gmailMessageId, gmailThreadId, dryRun ? 1 : 0)
         .run();

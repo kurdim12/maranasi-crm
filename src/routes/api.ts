@@ -490,6 +490,54 @@ api.post('/leads/:id/brief', async (c) => {
   return c.json({ ok: true, ...result });
 });
 
+/** A/B variants: add a challenger to a step template. */
+api.post('/templates/:id/variants', async (c) => {
+  const templateId = parseInt(c.req.param('id'), 10);
+  const base = await c.env.DB.prepare('SELECT id FROM templates WHERE id = ?').bind(templateId).first();
+  if (!base) return c.json({ error: 'template not found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as { subject_template?: string; body_template?: string };
+  if (!body.subject_template?.trim() || !body.body_template?.trim()) {
+    return c.json({ error: 'subject_template and body_template required' }, 400);
+  }
+  if (!/unsubscribe|opt.?out|rather not hear/i.test(body.body_template)) {
+    return c.json({ error: 'Variants need an explicit opt-out line too — add one, then save.' }, 400);
+  }
+  const count = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM template_variants WHERE template_id = ?')
+    .bind(templateId)
+    .first<{ n: number }>();
+  const label = String.fromCharCode(66 + (count?.n ?? 0)); // B, C, D…
+  const row = await c.env.DB.prepare(
+    'INSERT INTO template_variants (template_id, label, subject_template, body_template) VALUES (?, ?, ?, ?) RETURNING id',
+  )
+    .bind(templateId, label, body.subject_template.trim(), body.body_template.trim())
+    .first<{ id: number }>();
+  await logActivity(c.env.DB, 'owner', 'variant_created', null, { template_id: templateId, label });
+  return c.json({ ok: true, id: row!.id, label });
+});
+
+/** Promote a winning variant into the base template; the experiment ends. */
+api.post('/template-variants/:id/promote', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const v = await c.env.DB.prepare('SELECT * FROM template_variants WHERE id = ?').bind(id)
+    .first<{ id: number; template_id: number; label: string; subject_template: string; body_template: string }>();
+  if (!v) return c.json({ error: 'variant not found' }, 404);
+  await c.env.DB.prepare('UPDATE templates SET subject_template = ?, body_template = ? WHERE id = ?')
+    .bind(v.subject_template, v.body_template, v.template_id)
+    .run();
+  await c.env.DB.prepare('UPDATE template_variants SET active = 0 WHERE template_id = ?').bind(v.template_id).run();
+  await logActivity(c.env.DB, 'owner', 'variant_promoted', null, { template_id: v.template_id, winner: v.label });
+  return c.json({ ok: true, promoted: v.label });
+});
+
+/** Deactivate (retire) a losing variant. */
+api.delete('/template-variants/:id', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const res = await c.env.DB.prepare('UPDATE template_variants SET active = 0 WHERE id = ? AND active = 1').bind(id).run();
+  if (!res.meta.changes) return c.json({ error: 'variant not found or already retired' }, 404);
+  await logActivity(c.env.DB, 'owner', 'variant_retired', null, { variant_id: id });
+  return c.json({ ok: true });
+});
+
 /** Log a manual channel touch (WhatsApp/Zalo/Line/phone) — links only, never sends. */
 api.post('/leads/:id/touch', async (c) => {
   const id = parseInt(c.req.param('id'), 10);
@@ -721,6 +769,41 @@ api.get('/analytics', async (c) => {
     )
     .first<{ won: number; lost: number }>();
 
+  // Source ROI: which category × city cohorts actually convert (P6).
+  const roi = await db
+    .prepare(
+      `SELECT COALESCE(category, 'unknown') AS category, COALESCE(city, 'unknown') AS city, COUNT(*) AS leads,
+        SUM(CASE WHEN email_status = 'verified' THEN 1 ELSE 0 END) AS verified,
+        SUM(CASE WHEN id IN (SELECT lead_id FROM email_log WHERE direction='in' AND COALESCE(classification,'') NOT IN ('bounce','ooo')) THEN 1 ELSE 0 END) AS replied,
+        SUM(CASE WHEN status = 'interested' OR id IN (SELECT lead_id FROM deals) THEN 1 ELSE 0 END) AS interested,
+        SUM(CASE WHEN id IN (SELECT lead_id FROM deals WHERE stage = 'won') THEN 1 ELSE 0 END) AS won
+       FROM leads GROUP BY category, city HAVING leads > 0 ORDER BY leads DESC LIMIT 20`,
+    )
+    .all();
+
+  // Reply-time heatmap: weekday × lead-local hour (VN and TH are both UTC+7).
+  const heatmap = await db
+    .prepare(
+      `SELECT CAST(strftime('%w', created_at) AS INTEGER) AS dow,
+              (CAST(strftime('%H', created_at) AS INTEGER) + 7) % 24 AS hour, COUNT(*) AS n
+       FROM email_log WHERE direction = 'in' GROUP BY dow, hour`,
+    )
+    .all();
+
+  // A/B variant performance: replies that arrived after each labeled send.
+  const variants = await db
+    .prepare(
+      `SELECT e.sequence_step, e.variant_label, COUNT(*) AS sent,
+        SUM(CASE WHEN EXISTS (
+          SELECT 1 FROM email_log r WHERE r.lead_id = e.lead_id AND r.direction = 'in'
+            AND r.id > e.id AND COALESCE(r.classification, '') NOT IN ('bounce', 'ooo')
+        ) THEN 1 ELSE 0 END) AS replied
+       FROM email_log e
+       WHERE e.direction = 'out' AND e.variant_label IS NOT NULL AND e.sequence_step IS NOT NULL
+       GROUP BY e.sequence_step, e.variant_label ORDER BY e.sequence_step, e.variant_label`,
+    )
+    .all();
+
   const byCountry = await db
     .prepare(
       `SELECT COALESCE(country, '??') AS country, COUNT(*) AS total,
@@ -755,6 +838,9 @@ api.get('/analytics', async (c) => {
           : null,
     },
     by_country: byCountry.results,
+    roi: roi.results,
+    heatmap: heatmap.results,
+    variants: variants.results,
   });
 });
 
@@ -847,7 +933,18 @@ api.post('/agent', async (c) => {
 
 api.get('/templates', async (c) => {
   const rows = await c.env.DB.prepare('SELECT * FROM templates ORDER BY sequence_step, id').all();
-  return c.json({ templates: rows.results });
+  const variants = await c.env.DB.prepare('SELECT * FROM template_variants WHERE active = 1 ORDER BY template_id, id').all<{
+    template_id: number;
+  }>();
+  const byTemplate = new Map<number, unknown[]>();
+  for (const v of variants.results) {
+    const list = byTemplate.get(v.template_id) ?? [];
+    list.push(v);
+    byTemplate.set(v.template_id, list);
+  }
+  return c.json({
+    templates: rows.results.map((t) => ({ ...t, variants: byTemplate.get((t as { id: number }).id) ?? [] })),
+  });
 });
 
 api.put('/templates/:id', async (c) => {

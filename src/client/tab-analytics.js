@@ -31,7 +31,7 @@ function load() {
   req('GET', '/api/analytics').then((a) => {
     const grid = $('an-grid');
     if (!grid) return; // tab changed while in flight
-    grid.innerHTML = funnelCard(a) + ratesCard(a) + dailyCard(a) + countryCard(a);
+    grid.innerHTML = funnelCard(a) + ratesCard(a) + dailyCard(a) + countryCard(a) + roiCard(a) + heatmapCard(a) + variantsCard(a);
   }).catch(() => {});
 }
 
@@ -130,4 +130,56 @@ function countryCard(a) {
     ${bars || emptyHtml('No leads yet.')}
     ${byCountry.length ? '<div class="hint" style="margin-top:6px">★ = interested leads in that country</div>' : ''}
   </div>`;
+}
+
+// ---------- P6: source ROI ----------
+function roiCard(a) {
+  const rows = a.roi || [];
+  if (!rows.length) return '';
+  const pct = (n, d) => (d ? Math.round((n / d) * 100) + '%' : '—');
+  return `<div class="card" style="grid-column:1/-1">
+    <div class="cardtop"><b>Source ROI</b><span class="hint">which category × city cohorts convert — spend scrape budget there</span></div>
+    <div class="tablewrap"><table class="data"><thead><tr>
+      <th>Category</th><th>City</th><th>Leads</th><th>Verified</th><th>Replied</th><th>Interested</th><th>Won</th><th>Lead→reply</th><th>Reply→interested</th>
+    </tr></thead><tbody>${rows.map((r) => `
+      <tr><td class="pri">${esc(r.category)}</td><td>${esc(r.city)}</td>
+      <td class="num">${r.leads}</td><td class="num">${r.verified}</td><td class="num">${r.replied}</td>
+      <td class="num"${r.interested ? ' style="color:var(--hot)"' : ''}>${r.interested}</td>
+      <td class="num"${r.won ? ' style="color:var(--ok)"' : ''}>${r.won}</td>
+      <td class="num">${pct(r.replied, r.leads)}</td><td class="num">${pct(r.interested, r.replied)}</td></tr>`).join('')}
+    </tbody></table></div></div>`;
+}
+
+// ---------- P6: reply-time heatmap ----------
+function heatmapCard(a) {
+  const cells = a.heatmap || [];
+  if (!cells.length) return '';
+  const byKey = new Map(cells.map((c) => [`${c.dow}-${c.hour}`, c.n]));
+  const max = Math.max(...cells.map((c) => c.n));
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  let h = '<div style="display:grid;grid-template-columns:34px repeat(24,minmax(8px,1fr));gap:2px;overflow-x:auto">';
+  h += '<span></span>' + Array.from({ length: 24 }, (_, i) => `<span class="mono" style="font-size:9px;color:var(--t3);text-align:center">${i % 6 === 0 ? i : ''}</span>`).join('');
+  for (let d = 0; d < 7; d++) {
+    h += `<span class="mono" style="font-size:10px;color:var(--t3)">${DAYS[d]}</span>`;
+    for (let hr = 0; hr < 24; hr++) {
+      const n = byKey.get(`${d}-${hr}`) || 0;
+      const alpha = n ? 0.15 + 0.85 * (n / max) : 0;
+      h += `<span title="${DAYS[d]} ${hr}:00 lead-local — ${n} repl${n === 1 ? 'y' : 'ies'}" style="height:14px;border-radius:2px;background:${n ? `rgba(91,157,217,${alpha.toFixed(2)})` : 'var(--bg2)'}"></span>`;
+    }
+  }
+  h += '</div>';
+  return `<div class="card" style="grid-column:1/-1"><div class="cardtop"><b>When they reply</b><span class="hint">weekday × hour, lead-local (ICT)</span></div>${h}</div>`;
+}
+
+// ---------- P6: A/B variant performance ----------
+function variantsCard(a) {
+  const rows = a.variants || [];
+  if (!rows.length) return '';
+  return `<div class="card">
+    <div class="cardtop"><b>A/B variants</b><span class="hint">manage variants under System → Templates</span></div>
+    <div class="tablewrap"><table class="data"><thead><tr><th>Step</th><th>Variant</th><th>Sent</th><th>Replied</th><th>Reply %</th></tr></thead><tbody>${
+      rows.map((v) => `<tr><td class="num">${v.sequence_step}</td><td class="pri mono">${esc(v.variant_label)}</td>
+        <td class="num">${v.sent}</td><td class="num">${v.replied}</td>
+        <td class="num">${v.sent ? Math.round((v.replied / v.sent) * 100) : 0}%</td></tr>`).join('')
+    }</tbody></table></div></div>`;
 }
