@@ -35,7 +35,11 @@ export function openLead(id) {
         ${l.needs_call ? chip('NEEDS CALL', 'var(--hot)', 'hot') : ''}
         ${inSequence && !l.next_action_at ? chip('follow-ups paused', 'var(--warn)') : ''}
       </div>
-      ${l.drop_reason ? `<div class="drawer-meta">drop reason: ${esc(l.drop_reason)}</div>` : ''}`;
+      ${l.drop_reason ? `<div class="drawer-meta">drop reason: ${esc(l.drop_reason)}</div>` : ''}
+      <div class="chips-row" id="tag-row">${(data.tags || [])
+        .map((t) => `<span class="chip">${t.color ? `<i style="background:${esc(t.color)}"></i>` : ''}${esc(t.name)}
+          <button class="ghost tag-del" data-tag="${t.id}" aria-label="Remove tag ${esc(t.name)}" style="padding:0 2px;border:none">×</button></span>`)
+        .join('')}<button id="tag-add" class="ghost" style="padding:2px 8px;font-size:11.5px">+ tag</button></div>`;
 
     h += `<div class="sect"><h3>Contact</h3>
       <div class="frow"><label>email</label><span class="mono" style="color:var(--t2);overflow-wrap:anywhere">${esc(l.email || '—')}</span></div>
@@ -181,6 +185,22 @@ export function openLead(id) {
 
     const reopen = () => openLead(id);
     $('d-close').onclick = closeDrawer;
+    $('tag-add').onclick = async () => {
+      const existing = await req('GET', '/api/tags').catch(() => ({ tags: [] }));
+      const hint = existing.tags.length ? `existing: ${existing.tags.map((t) => t.name).join(', ')}` : '';
+      const ans = await inputModal({
+        title: 'Tag this lead',
+        fields: [{ key: 'name', label: 'tag', placeholder: 'e.g. priority, q4, warm', required: true }],
+        confirmLabel: 'Tag',
+        hint,
+      });
+      if (!ans) return;
+      const made = await req('POST', '/api/tags', { name: ans.name });
+      req('POST', `/api/leads/${id}/tags`, { tag_id: made.id }).then(() => { changed(); reopen(); });
+    };
+    document.querySelectorAll('.tag-del').forEach((b) => {
+      b.onclick = () => req('DELETE', `/api/leads/${id}/tags/${b.dataset.tag}`).then(() => { changed(); reopen(); });
+    });
     $('d-save').onclick = () => {
       const body = { notes: $('ed-notes').value };
       ['contact_name', 'phone', 'city', 'category', 'line_id'].forEach((f) => { body[f] = $(`ed-${f}`).value; });

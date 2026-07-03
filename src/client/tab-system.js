@@ -37,6 +37,8 @@ const SETTING_HINTS = {
   OPENROUTER_MODEL_AGENT: 'Override the CRM-agent model slug (default anthropic/claude-sonnet-4.6).',
   OPENROUTER_MODEL_FAST: 'Override the fast-model slug (default anthropic/claude-haiku-4.5).',
   ANTHROPIC_API_KEY: 'Optional fallback provider — OpenRouter wins when both are set.',
+  TELEGRAM_BOT_TOKEN: 'From @BotFather. With chat id set, you get pinged on interested replies and breaker trips.',
+  TELEGRAM_CHAT_ID: 'Your chat id (message @userinfobot). Both Telegram keys set = notifications on.',
 };
 
 let section = 'templates';

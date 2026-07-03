@@ -9,6 +9,8 @@ import type { Env } from '../env';
 
 export const MANAGED_KEYS = [
   'GOOGLE_PLACES_API_KEY',
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_CHAT_ID',
   'GMAIL_CLIENT_ID',
   'GMAIL_CLIENT_SECRET',
   'GMAIL_REFRESH_TOKEN',

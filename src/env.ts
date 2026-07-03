@@ -12,6 +12,8 @@ export interface Env {
   OPENROUTER_MODEL_AGENT?: string; // default anthropic/claude-sonnet-4.6
   OPENROUTER_MODEL_FAST?: string; // default anthropic/claude-haiku-4.5
   ANTHROPIC_API_KEY?: string; // fallback provider (Anthropic direct)
+  TELEGRAM_BOT_TOKEN?: string; // optional owner notifications
+  TELEGRAM_CHAT_ID?: string;
   GOOGLE_PLACES_API_KEY?: string;
   GMAIL_CLIENT_ID?: string;
   GMAIL_CLIENT_SECRET?: string;

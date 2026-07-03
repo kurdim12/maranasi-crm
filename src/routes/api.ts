@@ -209,7 +209,15 @@ api.get('/leads/:id', async (c) => {
   )
     .bind(id)
     .all();
-  return c.json({ lead, emails: emails.results, activities: activities.results, deals: deals.results, tasks: tasks.results });
+  const tags = await c.env.DB.prepare(
+    'SELECT t.id, t.name, t.color FROM tags t JOIN lead_tags lt ON lt.tag_id = t.id WHERE lt.lead_id = ? ORDER BY t.name',
+  )
+    .bind(id)
+    .all();
+  return c.json({
+    lead, emails: emails.results, activities: activities.results,
+    deals: deals.results, tasks: tasks.results, tags: tags.results,
+  });
 });
 
 api.patch('/leads/:id', async (c) => {
@@ -488,6 +496,145 @@ api.post('/leads/:id/brief', async (c) => {
   const result = await buildBrief(c.env, lead, crawl.text, crawl.socials);
   if (!result) return c.json({ error: 'Brief generation failed — check the LLM key in Settings.' }, 400);
   return c.json({ ok: true, ...result });
+});
+
+/** Tags. */
+api.get('/tags', async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT t.id, t.name, t.color, COUNT(lt.lead_id) AS uses
+     FROM tags t LEFT JOIN lead_tags lt ON lt.tag_id = t.id GROUP BY t.id ORDER BY t.name`,
+  ).all();
+  return c.json({ tags: rows.results });
+});
+api.post('/tags', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { name?: string; color?: string };
+  const name = body.name?.trim().toLowerCase().slice(0, 40);
+  if (!name) return c.json({ error: 'tag name required' }, 400);
+  const row = await c.env.DB.prepare('INSERT INTO tags (name, color) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET name=name RETURNING id')
+    .bind(name, body.color ?? null)
+    .first<{ id: number }>();
+  return c.json({ ok: true, id: row!.id, name });
+});
+api.post('/leads/:id/tags', async (c) => {
+  const leadId = parseInt(c.req.param('id'), 10);
+  const body = (await c.req.json().catch(() => ({}))) as { tag_id?: number };
+  if (!body.tag_id) return c.json({ error: 'tag_id required' }, 400);
+  await c.env.DB.prepare('INSERT OR IGNORE INTO lead_tags (lead_id, tag_id) VALUES (?, ?)').bind(leadId, body.tag_id).run();
+  await logActivity(c.env.DB, 'owner', 'lead_tagged', leadId, { tag_id: body.tag_id });
+  return c.json({ ok: true });
+});
+api.delete('/leads/:id/tags/:tagId', async (c) => {
+  const leadId = parseInt(c.req.param('id'), 10);
+  await c.env.DB.prepare('DELETE FROM lead_tags WHERE lead_id = ? AND tag_id = ?')
+    .bind(leadId, parseInt(c.req.param('tagId'), 10))
+    .run();
+  return c.json({ ok: true });
+});
+
+/** Saved views: named filter sets for the Leads tab (KV-backed). */
+api.get('/config/views', async (c) => {
+  const stored = await c.env.KV.get('config:saved_views');
+  return c.json({ views: stored ? JSON.parse(stored) : [] });
+});
+api.put('/config/views', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { views?: unknown[] };
+  const views = (Array.isArray(body.views) ? body.views : []).slice(0, 20);
+  await c.env.KV.put('config:saved_views', JSON.stringify(views));
+  return c.json({ ok: true, views });
+});
+
+/** Bulk actions over selected leads — every write audited per lead. */
+api.post('/leads/bulk', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { ids?: number[]; action?: string; tag_id?: number };
+  const ids = (Array.isArray(body.ids) ? body.ids : []).map(Number).filter((n) => Number.isFinite(n)).slice(0, 200);
+  if (!ids.length) return c.json({ error: 'ids required' }, 400);
+  const action = String(body.action ?? '');
+  let done = 0;
+  for (const id of ids) {
+    const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
+    if (!lead) continue;
+    if (action === 'tag' && body.tag_id) {
+      await c.env.DB.prepare('INSERT OR IGNORE INTO lead_tags (lead_id, tag_id) VALUES (?, ?)').bind(id, body.tag_id).run();
+      done++;
+    } else if (action === 'pause' && ['verified', 'contacted'].includes(lead.status) && lead.next_action_at) {
+      await c.env.DB.prepare("UPDATE leads SET next_action_at = NULL, updated_at = datetime('now') WHERE id = ?").bind(id).run();
+      await logActivity(c.env.DB, 'owner', 'sequence_paused', id, { via: 'bulk' });
+      done++;
+    } else if (action === 'resume' && ['verified', 'contacted'].includes(lead.status) && !lead.next_action_at && lead.sequence_step < 3) {
+      await c.env.DB.prepare("UPDATE leads SET next_action_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").bind(id).run();
+      await logActivity(c.env.DB, 'owner', 'sequence_resumed', id, { via: 'bulk' });
+      done++;
+    } else if (action === 'verify' && lead.email) {
+      const r = await verifyLead(c.env, c.env.DB, lead).catch(() => null);
+      if (r) done++;
+    }
+  }
+  if (action === 'tag') await logActivity(c.env.DB, 'owner', 'bulk_tagged', null, { count: done, tag_id: body.tag_id });
+  return c.json({ ok: true, done, of: ids.length });
+});
+
+/** Duplicate candidates: same domain or same normalized company name. */
+api.get('/duplicates', async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT l.id, l.company_name, l.email, l.domain, l.city, l.status, l.sequence_step,
+            COALESCE(l.domain, LOWER(REPLACE(l.company_name, ' ', ''))) AS dupe_key
+     FROM leads l
+     WHERE COALESCE(l.domain, LOWER(REPLACE(l.company_name, ' ', ''))) IN (
+       SELECT COALESCE(domain, LOWER(REPLACE(company_name, ' ', ''))) FROM leads
+       GROUP BY COALESCE(domain, LOWER(REPLACE(company_name, ' ', ''))) HAVING COUNT(*) > 1
+     ) ORDER BY dupe_key, l.id LIMIT 60`,
+  ).all();
+  return c.json({ duplicates: rows.results });
+});
+
+/**
+ * Merge a duplicate into a keeper: ALL history (mail, activities, deals,
+ * tasks, tags) moves to the keeper, missing contact fields are filled from
+ * the duplicate, then the emptied duplicate row is removed. Owner-initiated
+ * and wizard-confirmed — this is dedupe, not lead deletion.
+ */
+api.post('/leads/merge', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { keep_id?: number; merge_id?: number };
+  const keepId = Number(body.keep_id);
+  const mergeId = Number(body.merge_id);
+  if (!keepId || !mergeId || keepId === mergeId) return c.json({ error: 'keep_id and merge_id (different) required' }, 400);
+  const keep = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(keepId).first<Lead>();
+  const dupe = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(mergeId).first<Lead>();
+  if (!keep || !dupe) return c.json({ error: 'lead not found' }, 404);
+
+  for (const table of ['email_log', 'activities', 'deals', 'tasks']) {
+    await c.env.DB.prepare(`UPDATE ${table} SET lead_id = ? WHERE lead_id = ?`).bind(keepId, mergeId).run();
+  }
+  await c.env.DB.prepare('INSERT OR IGNORE INTO lead_tags (lead_id, tag_id) SELECT ?, tag_id FROM lead_tags WHERE lead_id = ?')
+    .bind(keepId, mergeId)
+    .run();
+  await c.env.DB.prepare('DELETE FROM lead_tags WHERE lead_id = ?').bind(mergeId).run();
+
+  // Fill gaps on the keeper from the duplicate; notes concatenate.
+  const fills: string[] = [];
+  const binds: unknown[] = [];
+  for (const f of ['contact_name', 'email', 'phone', 'website', 'domain', 'category', 'city', 'line_id'] as const) {
+    if (!keep[f] && dupe[f]) {
+      fills.push(`${f} = ?`);
+      binds.push(dupe[f]);
+    }
+  }
+  if (dupe.notes) {
+    fills.push("notes = COALESCE(notes, '') || ?");
+    binds.push(`\n[merged from #${mergeId}] ${dupe.notes}`);
+  }
+  if (fills.length) {
+    await c.env.DB.prepare(`UPDATE leads SET ${fills.join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+      .bind(...binds, keepId)
+      .run();
+  }
+  await c.env.DB.prepare('DELETE FROM leads WHERE id = ?').bind(mergeId).run();
+  await logActivity(c.env.DB, 'owner', 'leads_merged', keepId, {
+    merged_id: mergeId,
+    merged_company: dupe.company_name,
+    history_moved: true,
+  });
+  return c.json({ ok: true, kept: keepId, merged: mergeId });
 });
 
 /** A/B variants: add a challenger to a step template. */

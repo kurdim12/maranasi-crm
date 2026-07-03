@@ -13,6 +13,7 @@ import {
 } from '../lib/gmail';
 import { isSendingPaused, setSendingPaused } from '../lib/kvconf';
 import { ensureDealForInterested, triageForInbound } from '../lib/pipelineHooks';
+import { sendTelegram } from '../lib/telegram';
 import { transitionLead, type LeadStatus } from '../lib/stateMachine';
 import { CLASSIFIER_PROMPT } from '../prompts/classifier';
 
@@ -58,6 +59,7 @@ export async function checkBounceCircuitBreaker(env: Env): Promise<{ tripped: bo
     `⚠ Sending auto-paused: bounce rate ${(rate * 100).toFixed(1)}%`,
     `The trailing 7-day bounce rate hit ${(rate * 100).toFixed(1)}% (${bounces} bounces / ${sent} sends), above the ${BOUNCE_RATE_LIMIT * 100}% safety threshold.\n\nSending is now PAUSED. Before resuming from the dashboard:\n- check which domains bounced (Suppression tab, reason=bounce)\n- consider enabling the external verifier (VERIFIER_API_KEY)\n- re-verify the remaining queue\n\nResuming without fixing the list risks the sender domain's reputation.`,
   );
+  await sendTelegram(env, `⚠ Maranasi Outreach: sending AUTO-PAUSED — bounce rate ${(rate * 100).toFixed(1)}% (${bounces}/${sent}). Fix the list before resuming.`);
   return { tripped: true, rate, sent, bounces };
 }
 
@@ -134,6 +136,7 @@ async function applyClassification(
         `Lead #${lead.id} ${lead.company_name} replied and looks interested.\n\nFrom: ${msg.fromEmail}\nSubject: ${msg.subject}\n\n--- reply ---\n${msg.bodyText.slice(0, 4000)}`,
       );
       await logActivity(db, 'system', 'owner_notified', lead.id, { sent: notified, kind: 'interested_reply' });
+      await sendTelegram(env, `🔥 ${lead.company_name} (${lead.city ?? '?'}) replied INTERESTED:\n${msg.bodyText.slice(0, 300)}`);
       break;
     }
     case 'not_interested': {

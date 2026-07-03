@@ -2,7 +2,7 @@
 // v1 renderLeadsTab/loadLeads/loadBoard/openAddLead/openImport/exportCsv.
 import {
   $, esc, req, toast, state, chip, statusChip, STATUS_COLORS,
-  empty, skeletons, segmented, dataTable, openModal, closeModal, debounce,
+  empty, skeletons, segmented, dataTable, openModal, closeModal, debounce, inputModal, confirmModal,
 } from './core.js';
 import { openLead, onLeadChange } from './drawer.js';
 import { loadStats } from './app.js';
@@ -33,8 +33,13 @@ let view = 'table';   // 'table' | 'board'
 let offset = 0;
 let leadsCache = [];
 let tableCtl = null;
+const selected = new Set(); // bulk-selected lead ids
 
 const cols = [
+  {
+    key: '_sel', label: '', cls: '',
+    render: (r) => `<input type="checkbox" class="blk" data-id="${r.id}"${selected.has(r.id) ? ' checked' : ''} aria-label="Select ${esc(r.company_name)}">`,
+  },
   { key: 'id', label: 'ID', cls: 'num' },
   { key: 'company_name', label: 'Company', cls: 'pri', render: (r) => `<span title="${esc(r.company_name)}">${esc(r.company_name)}</span>` },
   { key: 'contact_name', label: 'Contact', render: (r) => esc(r.contact_name || '—') },
@@ -73,8 +78,20 @@ export function render(root) {
     <button id="btn-add">+ Add lead</button>
     <button id="btn-import">Import CSV</button>
     <button id="btn-export">Export</button>
+    <button id="btn-saveview" class="ghost" title="Save the current filters as a view">☆ Save view</button>
+    <button id="btn-dupes" class="ghost" title="Find and merge duplicate leads">⧉ Dupes</button>
   `);
   root.appendChild(filters);
+  const viewsBar = document.createElement('div');
+  viewsBar.id = 'views-bar';
+  viewsBar.className = 'filters';
+  viewsBar.style.marginTop = '-6px';
+  root.appendChild(viewsBar);
+  const bulkBar = document.createElement('div');
+  bulkBar.id = 'bulk-bar';
+  bulkBar.className = 'filters';
+  bulkBar.style.display = 'none';
+  root.appendChild(bulkBar);
 
   const body = document.createElement('div');
   body.id = 'leads-body';
@@ -91,8 +108,153 @@ export function render(root) {
   $('btn-add').addEventListener('click', openAddLead);
   $('btn-import').addEventListener('click', openImport);
   $('btn-export').addEventListener('click', exportCsv);
+  $('btn-saveview').addEventListener('click', saveCurrentView);
+  $('btn-dupes').addEventListener('click', openDupes);
 
+  selected.clear();
+  loadViews();
   loadLeads(false);
+}
+
+// ---------- saved views ----------
+async function loadViews() {
+  const bar = $('views-bar');
+  if (!bar) return;
+  const data = await req('GET', '/api/config/views').catch(() => ({ views: [] }));
+  const views = data.views || [];
+  bar.style.display = views.length ? '' : 'none';
+  bar.innerHTML = views.map((v, i) =>
+    `<span class="chip" style="cursor:pointer" data-i="${i}">${esc(v.name)}
+     <button class="ghost view-del" data-i="${i}" aria-label="Delete view ${esc(v.name)}" style="padding:0 2px;border:none">×</button></span>`).join('');
+  bar.querySelectorAll('.chip').forEach((chipEl) => {
+    chipEl.onclick = (e) => {
+      if (e.target.classList.contains('view-del')) return;
+      const v = views[+chipEl.dataset.i];
+      const f = v.filters || {};
+      if ($('f-status')) $('f-status').value = f.status || '';
+      if ($('f-country')) $('f-country').value = f.country || '';
+      if ($('f-needs-call')) $('f-needs-call').checked = !!f.needs_call;
+      if ($('f-q')) $('f-q').value = f.q || '';
+      offset = 0;
+      loadLeads(false);
+    };
+  });
+  bar.querySelectorAll('.view-del').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      views.splice(+b.dataset.i, 1);
+      await req('PUT', '/api/config/views', { views });
+      loadViews();
+    };
+  });
+}
+
+async function saveCurrentView() {
+  const ans = await inputModal({
+    title: 'Save current filters as a view',
+    fields: [{ key: 'name', label: 'name', placeholder: 'e.g. TH hot leads', required: true }],
+    confirmLabel: 'Save view',
+  });
+  if (!ans) return;
+  const data = await req('GET', '/api/config/views').catch(() => ({ views: [] }));
+  const views = data.views || [];
+  views.push({
+    name: ans.name,
+    filters: {
+      status: $('f-status') ? $('f-status').value : '',
+      country: $('f-country') ? $('f-country').value : '',
+      needs_call: $('f-needs-call') ? $('f-needs-call').checked : false,
+      q: $('f-q') ? $('f-q').value : '',
+    },
+  });
+  await req('PUT', '/api/config/views', { views });
+  toast('View saved', 'ok');
+  loadViews();
+}
+
+// ---------- bulk actions ----------
+function refreshBulkBar() {
+  const bar = $('bulk-bar');
+  if (!bar) return;
+  if (!selected.size) { bar.style.display = 'none'; return; }
+  bar.style.display = '';
+  bar.innerHTML = `<span class="mono" style="color:var(--t1)">${selected.size} selected</span>
+    <button id="bulk-tag">Tag</button>
+    <button id="bulk-pause">Pause</button>
+    <button id="bulk-resume" class="good">Resume</button>
+    <button id="bulk-verify">Verify</button>
+    <span class="grow"></span>
+    <button id="bulk-clear" class="ghost">Clear</button>`;
+  const run = (action, extra) =>
+    req('POST', '/api/leads/bulk', { ids: [...selected], action, ...extra }).then((r) => {
+      toast(`${r.done}/${r.of} ${action}${action === 'tag' ? 'ged' : 'd'}`, 'ok');
+      selected.clear();
+      loadLeads(false);
+      refreshBulkBar();
+    });
+  $('bulk-tag').onclick = async () => {
+    const ans = await inputModal({
+      title: `Tag ${selected.size} leads`,
+      fields: [{ key: 'name', label: 'tag', required: true }],
+      confirmLabel: 'Tag all',
+    });
+    if (!ans) return;
+    const made = await req('POST', '/api/tags', { name: ans.name });
+    run('tag', { tag_id: made.id });
+  };
+  $('bulk-pause').onclick = () => run('pause');
+  $('bulk-resume').onclick = () => run('resume');
+  $('bulk-verify').onclick = () => run('verify');
+  $('bulk-clear').onclick = () => { selected.clear(); loadLeads(false); refreshBulkBar(); };
+}
+
+// ---------- duplicate merge wizard ----------
+async function openDupes() {
+  const data = await req('GET', '/api/duplicates').catch(() => null);
+  const rows = (data && data.duplicates) || [];
+  if (!rows.length) { toast('No duplicate candidates found', 'ok'); return; }
+  const groups = new Map();
+  rows.forEach((r) => {
+    const list = groups.get(r.dupe_key) || [];
+    list.push(r);
+    groups.set(r.dupe_key, list);
+  });
+  let h = '<h3>Merge duplicates</h3><div class="hint-bar" style="margin-bottom:10px">Pick the keeper in each group — all mail, activity, deals and tasks move to it; gaps fill from the duplicates.</div>';
+  let gi = 0;
+  for (const [key, list] of groups) {
+    h += `<div class="card" data-group="${gi}"><div class="cardtop"><b class="mono">${esc(key)}</b></div>${
+      list.map((l, i) => `<label style="display:flex;gap:8px;align-items:center;padding:4px 0">
+        <input type="radio" name="keep-${gi}" value="${l.id}"${i === 0 ? ' checked' : ''}>
+        <span class="pri">#${l.id} ${esc(l.company_name)}</span>
+        <span class="mono" style="color:var(--t3)">${esc(l.email || '—')} · ${esc(l.status)} · step ${l.sequence_step}</span>
+      </label>`).join('')
+    }<div class="actions"><button class="danger merge-go" data-group="${gi}">Merge into keeper</button></div></div>`;
+    gi++;
+  }
+  h += '<div class="actions" style="justify-content:flex-end"><button id="dupes-close">Close</button></div>';
+  openModal(h);
+  $('dupes-close').onclick = closeModal;
+  const groupArr = [...groups.values()];
+  document.querySelectorAll('.merge-go').forEach((b) => {
+    b.onclick = async () => {
+      const g = +b.dataset.group;
+      const keepId = +document.querySelector(`input[name="keep-${g}"]:checked`).value;
+      const losers = groupArr[g].map((l) => l.id).filter((x) => x !== keepId);
+      const go = await confirmModal({
+        title: `Merge ${losers.length} duplicate${losers.length === 1 ? '' : 's'}?`,
+        message: `Everything moves to #${keepId}; the duplicate row${losers.length === 1 ? '' : 's'} are removed after their history transfers.`,
+        confirmLabel: 'Merge',
+        danger: true,
+      });
+      if (!go) return;
+      for (const mergeId of losers) {
+        await req('POST', '/api/leads/merge', { keep_id: keepId, merge_id: mergeId }).catch(() => {});
+      }
+      toast(`Merged into #${keepId}`, 'ok');
+      closeModal();
+      loadLeads(false);
+    };
+  });
 }
 
 export function keys(k, e) {
@@ -129,6 +291,16 @@ function loadLeads(append) {
       }
       tableCtl = dataTable(cols, { onOpen: (r) => openLead(r.id) });
       body.appendChild(tableCtl.el);
+      // Checkbox clicks select without opening the drawer (capture beats row onclick).
+      tableCtl.el.addEventListener('click', (e) => {
+        if (e.target.classList && e.target.classList.contains('blk')) e.stopPropagation();
+      }, true);
+      tableCtl.el.addEventListener('change', (e) => {
+        if (!e.target.classList || !e.target.classList.contains('blk')) return;
+        const lid = +e.target.dataset.id;
+        if (e.target.checked) selected.add(lid); else selected.delete(lid);
+        refreshBulkBar();
+      });
       const moreWrap = document.createElement('div');
       moreWrap.style.cssText = 'margin-top:10px;text-align:center';
       const moreBtn = document.createElement('button');
