@@ -73,6 +73,7 @@ export function render(root) {
     }</select>
     <select id="f-country" aria-label="Filter by country"><option value="">country: all</option><option>VN</option><option>TH</option></select>
     <label style="display:flex;align-items:center;gap:5px;color:var(--t2)"><input type="checkbox" id="f-needs-call"> needs call</label>
+    <label style="display:flex;align-items:center;gap:5px;color:var(--t2)"><input type="checkbox" id="f-mine"> mine</label>
     <input type="text" id="f-q" placeholder="Search…">
     <span class="grow"></span>
     <button id="btn-add">+ Add lead</button>
@@ -98,7 +99,7 @@ export function render(root) {
   body.innerHTML = skeletons(6);
   root.appendChild(body);
 
-  ['f-status', 'f-country', 'f-needs-call'].forEach((fid) => {
+  ['f-status', 'f-country', 'f-needs-call', 'f-mine'].forEach((fid) => {
     $(fid).addEventListener('change', () => { offset = 0; loadLeads(false); });
   });
   // Live search: filters as you type, like every other filter — no Enter needed.
@@ -115,6 +116,27 @@ export function render(root) {
   loadViews();
   loadLeads(false);
 }
+
+// Quick entry ('c' anywhere): company, contact, email, country — nothing else.
+document.addEventListener('mo:quick-lead', async () => {
+  const ans = await inputModal({
+    title: 'New lead — quick entry',
+    fields: [
+      { key: 'company_name', label: 'company', required: true },
+      { key: 'contact_name', label: 'contact name' },
+      { key: 'email', label: 'email', placeholder: 'optional — verified inline' },
+      { key: 'country', label: 'country', value: 'VN', placeholder: 'VN or TH', required: true },
+    ],
+    confirmLabel: 'Create lead',
+    hint: 'Everything else can wait — fill details later in the drawer.',
+  });
+  if (!ans) return;
+  req('POST', '/api/leads', ans).then((r) => {
+    toast(`Lead #${r.lead.id} created`, 'ok');
+    if ($('leads-body')) loadLeads(false);
+    openLead(r.lead.id);
+  });
+});
 
 // ---------- saved views ----------
 async function loadViews() {
@@ -271,6 +293,7 @@ function leadQuery() {
   if ($('f-country') && $('f-country').value) p.push('country=' + encodeURIComponent($('f-country').value));
   if ($('f-needs-call') && $('f-needs-call').checked) p.push('needs_call=1');
   if ($('f-q') && $('f-q').value) p.push('q=' + encodeURIComponent($('f-q').value));
+  if ($('f-mine') && $('f-mine').checked && state.userId) p.push('assigned_to=' + state.userId);
   return p;
 }
 

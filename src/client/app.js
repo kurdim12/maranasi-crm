@@ -48,6 +48,7 @@ function tryLogin() {
       $('login-btn').disabled = false;
       if (!res.ok) { $('login-err').textContent = res.d.error || 'Sign-in failed.'; return; }
       state.user = res.d.username;
+      state.userId = res.d.id ?? null;
       boot();
     })
     .catch(() => { $('login-btn').disabled = false; $('login-err').textContent = 'Network error.'; });
@@ -148,6 +149,11 @@ document.addEventListener('keydown', (e) => {
     if (search) { e.preventDefault(); search.focus(); }
     return;
   }
+  if (k === 'c') {
+    document.dispatchEvent(new CustomEvent('mo:quick-lead'));
+    e.preventDefault();
+    return;
+  }
   // delegate j/k/enter/e/r/t to the active tab
   if (activeTab && activeTab.keys && activeTab.keys(k, e)) e.preventDefault();
 });
@@ -166,6 +172,7 @@ const PAL_ACTIONS = [
   { label: 'Run scrape now', hint: '', run: () => req('POST', '/api/scrape/run', {}).then(() => toast('Scrape started — check System → Scrape runs.', 'ok')) },
   { label: 'Pause sending', hint: '', run: () => req('POST', '/api/sending/pause').then(() => { toast('Sending paused'); loadStats(); }) },
   { label: 'Resume sending', hint: '', run: () => req('POST', '/api/sending/resume').then(() => { toast('Sending resumed', 'ok'); loadStats(); }) },
+  { label: 'New lead (quick entry)', hint: 'c', run: () => document.dispatchEvent(new CustomEvent('mo:quick-lead')) },
   { label: 'Refresh data', hint: '', run: () => goTab(state.tab) },
 ];
 
@@ -383,5 +390,5 @@ $('modal-wrap').addEventListener('click', (e) => { if (e.target === $('modal-wra
 // ---------- boot ----------
 buildTabBars();
 fetch('/auth/me').then((r) => (r.ok ? r.json() : null)).then((me) => {
-  if (me && me.ok) { state.user = me.username; boot(); } else showLogin('');
+  if (me && me.ok) { state.user = me.username; state.userId = me.id ?? null; boot(); } else showLogin('');
 }).catch(() => showLogin(''));

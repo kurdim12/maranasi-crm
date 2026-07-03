@@ -55,6 +55,19 @@ export function openLead(id) {
       <div class="actions"><button class="primary" id="d-save">Save changes</button></div>
     </div>`;
 
+    // ---- People (C1): every human at this lead; the ★ primary is the sequence target ----
+    const contacts = data.contacts || [];
+    h += `<div class="sect"><h3>People (${contacts.length})</h3>${
+      contacts.map((ct) => `<div class="frow" style="align-items:flex-start">
+        <label style="padding-top:2px">${ct.is_primary ? '<span title="Primary — sequences email this person">★</span>' : `<button class="ghost ct-primary" data-ct="${ct.id}" title="Make primary" style="padding:0 4px">☆</button>`}</label>
+        <span style="flex:1"><b>${esc(ct.name)}</b>${ct.title ? ` <span style="color:var(--t3)">· ${esc(ct.title)}</span>` : ''}
+          <div class="mono" style="color:var(--t2);font-size:12px">${esc(ct.email || 'no email')}${ct.phone ? ` · ${esc(ct.phone)}` : ''}${ct.line_id ? ` · LINE:${esc(ct.line_id)}` : ''}</div></span>
+        <button class="ghost ct-edit" data-ct="${ct.id}" aria-label="Edit ${esc(ct.name)}">✎</button>
+        ${ct.is_primary ? '' : `<button class="ghost ct-del" data-ct="${ct.id}" aria-label="Delete ${esc(ct.name)}">×</button>`}
+      </div>`).join('') || '<p style="color:var(--t3);margin:0 0 8px">No people yet.</p>'
+    }<div class="actions"><button id="ct-add" class="ghost">+ Add person</button></div>
+    ${contacts.length > 1 ? '<div class="hint-bar">Only the ★ primary receives sequence emails; replies compose to them by default.</div>' : ''}</div>`;
+
     h += `<div class="sect"><h3>Actions</h3><div class="actions">
       <button class="good" id="d-reached">✓ Call: reached</button>
       <button id="d-noanswer">✗ Call: no answer</button>
@@ -63,7 +76,8 @@ export function openLead(id) {
       ${inSequence && l.next_action_at ? '<button id="d-pause" class="danger">Pause follow-ups</button>' : ''}
       ${inSequence && !l.next_action_at && l.sequence_step < 3 ? '<button id="d-resume" class="good">Resume follow-ups</button>' : ''}
     </div>
-    <div class="hint-bar">Logging "no answer" is the human gate that later allows the agent to drop this lead.</div></div>`;
+    <div class="hint-bar">Logging "no answer" is the human gate that later allows the agent to drop this lead.</div>
+    <div class="frow" style="margin-top:10px"><label>assigned to</label><select id="d-assign" aria-label="Assigned to"><option value="">unassigned</option></select></div></div>`;
 
     // ---- Intelligence (P4): brief, fit score, socials ----
     let brief = null;
@@ -118,6 +132,7 @@ export function openLead(id) {
         <div class="frow"><label>expected close</label><input id="dl-close" class="mono" placeholder="YYYY-MM-DD" value="${esc(deal.expected_close ? String(deal.expected_close).slice(0, 10) : '')}" ${terminal ? 'disabled' : ''}></div>
         <div class="frow"><label>next step</label><input id="dl-next" value="${esc(deal.next_step)}" ${terminal ? 'disabled' : ''}></div>
         ${terminal ? '' : '<div class="actions"><button id="dl-save">Save deal</button></div>'}
+        ${deal.stage === 'won' ? '<div class="actions"><button id="dl-copy" class="ghost">⧉ Copy deal summary</button></div>' : ''}
       </div>`;
     }
 
@@ -201,6 +216,68 @@ export function openLead(id) {
     document.querySelectorAll('.tag-del').forEach((b) => {
       b.onclick = () => req('DELETE', `/api/leads/${id}/tags/${b.dataset.tag}`).then(() => { changed(); reopen(); });
     });
+
+    // People handlers
+    const personFields = (ct) => ([
+      { key: 'name', label: 'name', value: ct ? ct.name : '', required: true },
+      { key: 'title', label: 'title', value: ct ? ct.title || '' : '' },
+      { key: 'email', label: 'email', value: ct ? ct.email || '' : '' },
+      { key: 'phone', label: 'phone', value: ct ? ct.phone || '' : '' },
+      { key: 'line_id', label: 'LINE ID', value: ct ? ct.line_id || '' : '' },
+    ]);
+    $('ct-add').onclick = async () => {
+      const ans = await inputModal({ title: 'Add person', fields: personFields(null), confirmLabel: 'Add' });
+      if (!ans) return;
+      req('POST', `/api/leads/${id}/contacts`, ans).then(() => { toast('Person added', 'ok'); changed(); reopen(); });
+    };
+    document.querySelectorAll('.ct-edit').forEach((b) => {
+      b.onclick = async () => {
+        const ct = contacts.find((x) => x.id === +b.dataset.ct);
+        const ans = await inputModal({
+          title: `Edit ${ct.name}`,
+          fields: personFields(ct),
+          confirmLabel: 'Save',
+          hint: ct.is_primary ? 'Changing the primary email re-runs verification before any sequence send.' : '',
+        });
+        if (!ans) return;
+        req('PATCH', `/api/contacts/${ct.id}`, ans).then(() => { toast('Person saved', 'ok'); changed(); reopen(); });
+      };
+    });
+    document.querySelectorAll('.ct-primary').forEach((b) => {
+      b.onclick = () => req('POST', `/api/contacts/${b.dataset.ct}/primary`)
+        .then((r) => { toast(r.emailChanged ? 'Primary changed — email re-verifying' : 'Primary changed', 'ok'); changed(); reopen(); });
+    });
+    document.querySelectorAll('.ct-del').forEach((b) => {
+      b.onclick = async () => {
+        const go = await confirmModal({ title: 'Remove person?', message: 'Their row is removed; the lead and its history stay.', confirmLabel: 'Remove', danger: true });
+        if (go) req('DELETE', `/api/contacts/${b.dataset.ct}`).then(() => { changed(); reopen(); });
+      };
+    });
+
+    // Assignment
+    req('GET', '/api/users').then((u) => {
+      const sel = $('d-assign');
+      if (!sel) return;
+      (u.users || []).filter((x) => x.active).forEach((x) => {
+        const o = document.createElement('option');
+        o.value = x.id;
+        o.textContent = x.display_name || x.username;
+        if (l.assigned_to === x.id) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.onchange = () => req('POST', `/api/leads/${id}/assign`, { user_id: sel.value ? +sel.value : null })
+        .then(() => { toast('Assignment saved', 'ok'); changed(); });
+    }).catch(() => {});
+
+    if ($('dl-copy') && deal) $('dl-copy').onclick = () => {
+      const summary = {
+        company: l.company_name, contact: l.contact_name, email: l.email, city: l.city, country: l.country,
+        deal: { value_usd: deal.value_usd, won_at: deal.updated_at, expected_close: deal.expected_close, next_step: deal.next_step },
+      };
+      navigator.clipboard.writeText(JSON.stringify(summary, null, 2))
+        .then(() => toast('Deal summary copied — paste into your invoicing tool', 'ok'))
+        .catch(() => toast('Clipboard blocked by the browser', 'err'));
+    };
     $('d-save').onclick = () => {
       const body = { notes: $('ed-notes').value };
       ['contact_name', 'phone', 'city', 'category', 'line_id'].forEach((f) => { body[f] = $(`ed-${f}`).value; });

@@ -14,6 +14,7 @@ import { transitionDeal } from '../lib/dealMachine';
 import { findEmailForSite } from '../lib/crawler';
 import { createTaskOnce, markLeadReplied, resolvedTriage } from '../lib/pipelineHooks';
 import { manualSendGuard } from '../lib/sendGuards';
+import { addContact, deleteContact, listContacts, setPrimary, updateContact } from '../lib/contacts';
 import { gmailConfigured, gmailGetProfile, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
 import { getHealth } from '../lib/health';
 import { getDailyCap, getSentToday, isSendingPaused, setSendingPaused } from '../lib/kvconf';
@@ -56,6 +57,11 @@ api.get('/leads', async (c) => {
     binds.push(`%${city}%`);
   }
   if (needs_call === '1' || needs_call === 'true') clauses.push('needs_call = 1');
+  const assigned = c.req.query('assigned_to');
+  if (assigned) {
+    clauses.push('assigned_to = ?');
+    binds.push(parseInt(assigned, 10));
+  }
   if (q) {
     // Case-insensitive substring across the fields people actually search by.
     clauses.push('(company_name LIKE ? OR domain LIKE ? OR contact_name LIKE ? OR email LIKE ? OR notes LIKE ? OR city LIKE ?)');
@@ -214,9 +220,10 @@ api.get('/leads/:id', async (c) => {
   )
     .bind(id)
     .all();
+  const contacts = await listContacts(c.env.DB, id);
   return c.json({
     lead, emails: emails.results, activities: activities.results,
-    deals: deals.results, tasks: tasks.results, tags: tags.results,
+    deals: deals.results, tasks: tasks.results, tags: tags.results, contacts,
   });
 });
 
@@ -296,8 +303,18 @@ api.post('/leads/:id/email', async (c) => {
   const id = parseInt(c.req.param('id'), 10);
   const lead = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(id).first<Lead>();
   if (!lead) return c.json({ error: 'not found' }, 404);
-  const body = (await c.req.json().catch(() => ({}))) as { subject?: string; body?: string };
+  const body = (await c.req.json().catch(() => ({}))) as { subject?: string; body?: string; to_contact_id?: number };
   if (!body.subject?.trim() || !body.body?.trim()) return c.json({ error: 'subject and body required' }, 400);
+  // Optional contact picker override — the chosen contact's email becomes the
+  // target for THIS send only; all guards run against that address.
+  if (body.to_contact_id) {
+    const contact = await c.env.DB.prepare('SELECT email FROM contacts WHERE id = ? AND lead_id = ?')
+      .bind(Number(body.to_contact_id), id)
+      .first<{ email: string | null }>();
+    if (!contact) return c.json({ error: 'contact not found on this lead' }, 404);
+    if (!contact.email) return c.json({ error: 'That contact has no email address.' }, 400);
+    lead.email = contact.email;
+  }
   const suppressed = lead.email
     ? await c.env.DB.prepare('SELECT reason FROM suppression WHERE email = ?').bind(lead.email.toLowerCase()).first()
     : null;
@@ -496,6 +513,75 @@ api.post('/leads/:id/brief', async (c) => {
   const result = await buildBrief(c.env, lead, crawl.text, crawl.socials);
   if (!result) return c.json({ error: 'Brief generation failed — check the LLM key in Settings.' }, 400);
   return c.json({ ok: true, ...result });
+});
+
+/** Contacts: multiple people per lead; exactly one primary (the sequence target). */
+api.get('/leads/:id/contacts', async (c) => {
+  const leadId = parseInt(c.req.param('id'), 10);
+  return c.json({ contacts: await listContacts(c.env.DB, leadId) });
+});
+api.post('/leads/:id/contacts', async (c) => {
+  const leadId = parseInt(c.req.param('id'), 10);
+  const lead = await c.env.DB.prepare('SELECT id FROM leads WHERE id = ?').bind(leadId).first();
+  if (!lead) return c.json({ error: 'lead not found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, string>;
+  if (!body.name?.trim()) return c.json({ error: 'name required' }, 400);
+  if (body.email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(body.email.trim())) return c.json({ error: 'invalid email' }, 400);
+  const made = await addContact(c.env.DB, leadId, { name: body.name, title: body.title, email: body.email, phone: body.phone, line_id: body.line_id });
+  if (made.becamePrimary && body.email) {
+    const fresh = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(leadId).first<Lead>();
+    if (fresh) await verifyLead(c.env, c.env.DB, fresh).catch(() => null);
+  }
+  return c.json({ ok: true, ...made });
+});
+api.patch('/contacts/:id', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, string>;
+  if (body.email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(body.email.trim())) return c.json({ error: 'invalid email' }, 400);
+  try {
+    const r = await updateContact(c.env.DB, id, body);
+    if (r.emailChanged) {
+      const fresh = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(r.leadId).first<Lead>();
+      if (fresh) await verifyLead(c.env, c.env.DB, fresh).catch(() => null);
+    }
+    return c.json({ ok: true, ...r });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : 'update failed' }, 404);
+  }
+});
+api.post('/contacts/:id/primary', async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  try {
+    const r = await setPrimary(c.env.DB, id);
+    if (r.emailChanged) {
+      const fresh = await c.env.DB.prepare('SELECT * FROM leads WHERE id = ?').bind(r.leadId).first<Lead>();
+      if (fresh) await verifyLead(c.env, c.env.DB, fresh).catch(() => null);
+    }
+    return c.json({ ok: true, ...r });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : 'not found' }, 404);
+  }
+});
+api.delete('/contacts/:id', async (c) => {
+  const r = await deleteContact(c.env.DB, parseInt(c.req.param('id'), 10));
+  return 'error' in r ? c.json(r, 400) : c.json(r);
+});
+
+/** Assign a lead/deal/task to a user. */
+api.post('/leads/:id/assign', async (c) => {
+  const leadId = parseInt(c.req.param('id'), 10);
+  const body = (await c.req.json().catch(() => ({}))) as { user_id?: number | null };
+  const userId = body.user_id ? Number(body.user_id) : null;
+  if (userId) {
+    const u = await c.env.DB.prepare('SELECT id FROM users WHERE id = ? AND active = 1').bind(userId).first();
+    if (!u) return c.json({ error: 'user not found' }, 404);
+  }
+  const res = await c.env.DB.prepare("UPDATE leads SET assigned_to = ?, updated_at = datetime('now') WHERE id = ?")
+    .bind(userId, leadId)
+    .run();
+  if (!res.meta.changes) return c.json({ error: 'lead not found' }, 404);
+  await logActivity(c.env.DB, 'owner', 'lead_assigned', leadId, { user_id: userId });
+  return c.json({ ok: true, assigned_to: userId });
 });
 
 /** Tags. */
@@ -750,7 +836,7 @@ api.put('/config/icp', async (c) => {
 /** Pipeline: deals grouped by stage with per-column totals. */
 api.get('/pipeline', async (c) => {
   const rows = await c.env.DB.prepare(
-    `SELECT d.*, l.company_name, l.city, l.country, l.status AS lead_status, l.email AS lead_email
+    `SELECT d.*, l.company_name, l.city, l.country, l.status AS lead_status, l.email AS lead_email, l.assigned_to AS lead_assigned_to
      FROM deals d JOIN leads l ON l.id = d.lead_id ORDER BY d.updated_at DESC LIMIT 300`,
   ).all();
   const winRow = await c.env.DB.prepare(
@@ -805,22 +891,27 @@ api.patch('/deals/:id', async (c) => {
 /** Everything the Today home screen needs, in one request. */
 api.get('/today', async (c) => {
   const db = c.env.DB;
+  const mineId = c.req.query('assigned_to') ? parseInt(c.req.query('assigned_to')!, 10) : null;
+  const mineCond = mineId ? ' AND (l.assigned_to = ? OR l.assigned_to IS NULL)' : '';
+  const mineBinds = mineId ? [mineId] : [];
   const needsReply = await db
     .prepare(
       `SELECT e.id AS email_id, e.lead_id, e.subject, substr(e.body,1,160) AS snippet, e.classification, e.created_at,
               l.company_name, l.email AS lead_email, l.status AS lead_status
        FROM email_log e JOIN leads l ON l.id = e.lead_id
        WHERE e.direction = 'in' AND e.triage = 'needs_reply'
-         AND (e.snoozed_until IS NULL OR e.snoozed_until <= datetime('now'))
+         AND (e.snoozed_until IS NULL OR e.snoozed_until <= datetime('now'))${mineCond}
        ORDER BY e.created_at DESC LIMIT 20`,
     )
+    .bind(...mineBinds)
     .all();
   const callsDue = await db
     .prepare(
       `SELECT l.id, l.company_name, l.phone, l.city, l.country, l.status, l.updated_at,
               (SELECT t.id FROM tasks t WHERE t.lead_id = l.id AND t.done_at IS NULL AND t.title LIKE 'Call %' LIMIT 1) AS task_id
-       FROM leads l WHERE l.needs_call = 1 ORDER BY l.updated_at DESC LIMIT 20`,
+       FROM leads l WHERE l.needs_call = 1${mineCond} ORDER BY l.updated_at DESC LIMIT 20`,
     )
+    .bind(...mineBinds)
     .all();
   const tasks = await db
     .prepare(

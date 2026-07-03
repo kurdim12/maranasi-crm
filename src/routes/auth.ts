@@ -78,11 +78,11 @@ auth.get('/me', async (c) => {
     const session = await getSession(c.env, token);
     if (session) {
       const user = await c.env.DB.prepare(
-        'SELECT username, display_name FROM users WHERE username = ? AND active = 1',
+        'SELECT id, username, display_name FROM users WHERE username = ? AND active = 1',
       )
         .bind(session.username)
-        .first<{ username: string; display_name: string | null }>();
-      if (user) return c.json({ ok: true, username: user.username, display_name: user.display_name });
+        .first<{ id: number; username: string; display_name: string | null }>();
+      if (user) return c.json({ ok: true, id: user.id, username: user.username, display_name: user.display_name });
     }
   }
   const key = c.req.header('X-API-Key');
