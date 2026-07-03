@@ -301,7 +301,7 @@ export async function runSequenceEngine(env: Env, opts: SequenceOptions = {}): P
         console.log(`[DRY_RUN] would send step ${step} to ${lead.email} | subject: ${subject}`);
       } else {
         try {
-          const replyHeaders = threadId ? await gmailThreadReplyHeaders(env, threadId) : {};
+          const replyHeaders = threadId ? await gmailThreadReplyHeaders(env, threadId, db) : {};
           const sent = await gmailSend(env, {
             to: lead.email!,
             subject,

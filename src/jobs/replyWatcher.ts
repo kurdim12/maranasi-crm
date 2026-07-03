@@ -3,12 +3,13 @@ import { nowIso } from '../env';
 import { logActivity, logError } from '../lib/activity';
 import { llmText, parseJsonLoose } from '../lib/llm';
 import {
-  gmailConfigured,
   gmailGetMessage,
   gmailGetProfile,
   gmailListHistory,
   gmailListRecentInbox,
+  oauthConfigured,
   sendOwnerEmail,
+  smtpConfigured,
   type ParsedMessage,
 } from '../lib/gmail';
 import { isSendingPaused, setSendingPaused } from '../lib/kvconf';
@@ -208,8 +209,14 @@ export interface WatcherStats {
 export async function runReplyWatcher(env: Env): Promise<WatcherStats> {
   const db = env.DB;
   const stats: WatcherStats = { processed: 0, matched: 0, skipped: 0 };
-  if (!gmailConfigured(env)) {
-    console.log('[watcher] gmail not configured, skipping');
+  // Reading the inbox needs the Gmail REST API — an app password only covers
+  // sending. In SMTP-only mode the watcher stays off (no auto-pause on reply).
+  if (!oauthConfigured(env)) {
+    console.log(
+      smtpConfigured(env)
+        ? '[watcher] smtp-only mode — reply watching needs the full Gmail connect'
+        : '[watcher] gmail not configured, skipping',
+    );
     return stats;
   }
 

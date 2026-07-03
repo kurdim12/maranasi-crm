@@ -18,6 +18,7 @@ export interface Env {
   GMAIL_CLIENT_ID?: string;
   GMAIL_CLIENT_SECRET?: string;
   GMAIL_REFRESH_TOKEN?: string;
+  GMAIL_APP_PASSWORD?: string; // send-only SMTP path (no Google Cloud Console)
   RECAP_EMAIL?: string;
   SENDER_EMAIL?: string;
   SENDER_NAME?: string;

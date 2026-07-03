@@ -28,11 +28,12 @@ const SETTING_HINTS = {
   GOOGLE_PLACES_API_KEY: 'console.cloud.google.com → enable "Places API (New)" → Credentials → Create API key. Powers lead sourcing.',
   VERIFIER_API_KEY: 'zerobounce.net API key (optional, recommended before real sending — protects bounce rate).',
   RECAP_EMAIL: 'Where daily recaps, interested-reply alerts and failure alerts are sent.',
-  SENDER_EMAIL: 'The outreach inbox address (auto-filled by Gmail connect).',
+  SENDER_EMAIL: 'The outreach inbox address (auto-filled by the full Gmail connect, or set with the app password).',
   SENDER_NAME: 'Display name on outgoing email, e.g. "Rami from Maranasi".',
   GMAIL_CLIENT_ID: 'Managed by the Gmail connect flow above — rarely edited by hand.',
   GMAIL_CLIENT_SECRET: 'Managed by the Gmail connect flow above.',
   GMAIL_REFRESH_TOKEN: 'Created automatically when Gmail is connected.',
+  GMAIL_APP_PASSWORD: 'Gmail app password (Option 1 above) — enables sending without Google Cloud Console. Reply detection still needs the full connect.',
   OPENROUTER_API_KEY: 'openrouter.ai/settings/keys — one key drives all AI features.',
   OPENROUTER_MODEL_AGENT: 'Override the CRM-agent model slug (default anthropic/claude-sonnet-4.6).',
   OPENROUTER_MODEL_FAST: 'Override the fast-model slug (default anthropic/claude-haiku-4.5).',
@@ -363,7 +364,30 @@ function renderSettings() {
       <div class="foot"><button id="demo-seed">Seed demo data</button><button id="demo-remove" class="danger">Remove demo data</button></div>
       <div id="demo-out" style="margin-top:8px;color:var(--t2)"></div></div>`;
 
-    h += `<div class="tpl"><div class="top"><b>Connect Gmail</b>${chip('guided', 'var(--info)')}</div>
+    const setting = (k) => (data.settings || []).find((s) => s.key === k);
+    const hasOauth = setting('GMAIL_REFRESH_TOKEN')?.source !== 'unset';
+    const hasAppPw = setting('GMAIL_APP_PASSWORD')?.source !== 'unset';
+    const hasSender = setting('SENDER_EMAIL')?.source !== 'unset';
+    const gmState = hasOauth
+      ? { chip: chip('fully connected', 'var(--ok)'), line: 'Sending and reply detection are both live.' }
+      : hasAppPw && hasSender
+        ? { chip: chip('sending live', 'var(--ok)'), line: 'Sending works via the app password. Reply detection (auto-pause when someone answers, interested alerts) stays off until the full connect below is done.' }
+        : { chip: chip('not connected', 'var(--warn)'), line: 'No real email can go out yet. The app password path takes about 3 minutes.' };
+
+    h += `<div class="tpl"><div class="top"><b>Connect Gmail</b>${gmState.chip}</div>
+      <div class="placeholders" style="margin-bottom:12px">${gmState.line}</div>
+
+      <div style="margin-bottom:6px"><b>Option 1 — App password</b> <span class="placeholders">(~3 minutes, easiest — no Google Cloud Console)</span></div>
+      <div class="placeholders" style="margin-bottom:10px;line-height:1.8">
+        1. Turn on <b>2-Step Verification</b> for the outreach Google account: <code>myaccount.google.com/security</code><br>
+        2. Open <code>myaccount.google.com/apppasswords</code> and create one named <b>Maranasi CRM</b>.<br>
+        3. Paste the 16-character password below${hasSender ? '' : ' along with the Gmail address it belongs to'}, then Save.
+      </div>
+      ${hasSender ? '' : '<input type="text" id="gm-sender" placeholder="Outreach Gmail address (e.g. hello@maranasi.com)" style="margin-bottom:8px">'}
+      <input type="password" id="gm-apppw" placeholder="16-character app password" autocomplete="off">
+      <div class="foot"><button class="primary" id="gm-apppw-save">Save &amp; test</button></div>
+
+      <div style="margin:14px 0 6px"><b>Option 2 — Full connect</b> <span class="placeholders">(adds reply detection: auto-pause on reply, interested alerts, bounce breaker)</span></div>
       <div class="placeholders" style="margin-bottom:10px;line-height:1.8">
         1. In <b>console.cloud.google.com</b>: enable the <b>Gmail API</b>, set up the OAuth consent screen, then Credentials → Create OAuth client ID → type <b>Web application</b>.<br>
         2. Add this authorized redirect URI: <code id="gm-redirect"></code> <button id="gm-copy" style="padding:1px 8px">copy</button><br>
@@ -415,6 +439,22 @@ function renderSettings() {
         toast('ICP reset to default', 'ok');
         renderSettings();
       }).catch(() => {});
+    };
+    $('gm-apppw-save').onclick = async () => {
+      const pw = $('gm-apppw').value.replace(/\s+/g, ''); // Google shows it with spaces
+      if (!pw) { toast('Paste the app password first', 'warn'); return; }
+      const sender = $('gm-sender') ? $('gm-sender').value.trim() : '';
+      if ($('gm-sender') && !sender) { toast('Enter the outreach Gmail address too', 'warn'); return; }
+      $('gm-apppw-save').disabled = true;
+      try {
+        if (sender) await req('PUT', '/api/settings/SENDER_EMAIL', { value: sender });
+        await req('PUT', '/api/settings/GMAIL_APP_PASSWORD', { value: pw });
+        const r = await req('POST', '/api/settings/test/gmail');
+        if (r.ok) toast('Gmail sending is live — app password verified', 'ok');
+        else toast(r.error || 'Saved, but the SMTP login failed — recheck the password', 'warn');
+      } catch (e) { /* req already toasts */ }
+      $('gm-apppw-save').disabled = false;
+      renderSettings();
     };
     $('gm-redirect').textContent = `${location.origin}/auth/gmail/callback`;
     $('gm-copy').onclick = () => {

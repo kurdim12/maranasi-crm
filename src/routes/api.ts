@@ -15,7 +15,7 @@ import { findEmailForSite } from '../lib/crawler';
 import { createTaskOnce, markLeadReplied, resolvedTriage } from '../lib/pipelineHooks';
 import { manualSendGuard } from '../lib/sendGuards';
 import { addContact, deleteContact, listContacts, setPrimary, updateContact } from '../lib/contacts';
-import { gmailConfigured, gmailGetProfile, gmailSend, gmailThreadReplyHeaders } from '../lib/gmail';
+import { gmailConfigured, gmailGetProfile, gmailSend, gmailThreadReplyHeaders, oauthConfigured, smtpConfigured, smtpVerify } from '../lib/gmail';
 import { getHealth } from '../lib/health';
 import { getDailyCap, getSentToday, isSendingPaused, setSendingPaused } from '../lib/kvconf';
 import { llmProvider, llmText } from '../lib/llm';
@@ -328,7 +328,7 @@ api.post('/leads/:id/email', async (c) => {
     .bind(id)
     .first<{ gmail_thread_id: string }>();
   const threadId = prevOut?.gmail_thread_id ?? undefined;
-  const replyHeaders = threadId ? await gmailThreadReplyHeaders(c.env, threadId) : {};
+  const replyHeaders = threadId ? await gmailThreadReplyHeaders(c.env, threadId, c.env.DB) : {};
   const sent = await gmailSend(c.env, {
     to: lead.email!, // manualSendGuard already refused email-less leads
     subject: body.subject.trim(),
@@ -1290,11 +1290,21 @@ api.post('/settings/test/:integration', async (c) => {
         return c.json({ ok: true, detail: `Places API works — test query returned ${places.length} results.` });
       }
       case 'gmail': {
-        if (!gmailConfigured(c.env)) {
-          return c.json({ ok: false, error: 'Gmail is not connected (client id/secret/refresh token missing)' });
+        if (oauthConfigured(c.env)) {
+          const profile = await gmailGetProfile(c.env);
+          return c.json({ ok: true, detail: `Connected as ${profile.emailAddress} (full connect — sending + reply detection).` });
         }
-        const profile = await gmailGetProfile(c.env);
-        return c.json({ ok: true, detail: `Connected as ${profile.emailAddress}.` });
+        if (smtpConfigured(c.env)) {
+          await smtpVerify(c.env); // real SMTP login, nothing sent
+          return c.json({
+            ok: true,
+            detail: `App password works — SMTP login as ${c.env.SENDER_EMAIL} succeeded. Sending is live; reply detection needs the full connect.`,
+          });
+        }
+        return c.json({
+          ok: false,
+          error: 'Gmail is not connected. Easiest: set SENDER_EMAIL + a Gmail app password. Or run the full OAuth connect.',
+        });
       }
       case 'llm': {
         const provider = llmProvider(c.env);

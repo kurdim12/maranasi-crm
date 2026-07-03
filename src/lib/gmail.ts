@@ -1,9 +1,28 @@
 import type { Env } from '../env';
 
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const SMTP_HOST = 'smtp.gmail.com';
+const SMTP_PORT = 465; // implicit TLS — Workers block port 25, 465/587 are fine
 
-export function gmailConfigured(env: Env): boolean {
+/**
+ * Two ways to connect Gmail, resolved in this order:
+ *   OAuth (client id/secret/refresh token) — full: sending via the REST API
+ *     AND inbox reading for the reply watcher.
+ *   App password (SENDER_EMAIL + GMAIL_APP_PASSWORD) — send-only via SMTP.
+ *     No Google Cloud Console needed; reply watching stays off until the
+ *     full OAuth connect is done.
+ */
+export function oauthConfigured(env: Env): boolean {
   return Boolean(env.GMAIL_CLIENT_ID && env.GMAIL_CLIENT_SECRET && env.GMAIL_REFRESH_TOKEN);
+}
+
+export function smtpConfigured(env: Env): boolean {
+  return Boolean(env.SENDER_EMAIL && env.GMAIL_APP_PASSWORD);
+}
+
+/** Can the system send real email through either transport? */
+export function gmailConfigured(env: Env): boolean {
+  return oauthConfigured(env) || smtpConfigured(env);
 }
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
@@ -86,7 +105,85 @@ export interface SendArgs {
   listUnsubscribe?: boolean;
 }
 
+/**
+ * SMTP transport (Gmail app password). We mint our own RFC 822 Message-ID and
+ * return it as `id`; the first message's ID doubles as the thread key that
+ * follow-ups reuse, so replies still thread in the recipient's mailbox even
+ * though the Gmail API never sees these sends.
+ */
+function newMessageId(env: Env): string {
+  const domain = env.SENDER_EMAIL?.split('@')[1] || 'invalid.local';
+  return `<mo-${crypto.randomUUID()}@${domain}>`;
+}
+
+async function smtpConnect(env: Env) {
+  // Dynamic import: worker-mailer pulls in cloudflare:sockets at module top,
+  // which only exists inside the Workers runtime (not vitest/node).
+  const { WorkerMailer } = await import('worker-mailer');
+  const connecting = WorkerMailer.connect({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: true,
+    credentials: { username: env.SENDER_EMAIL!, password: env.GMAIL_APP_PASSWORD! },
+    authType: 'plain',
+    socketTimeoutMs: 20_000,
+  });
+  // The library's timeouts only cover an ESTABLISHED session — a socket that
+  // never opens (blocked egress, dead network path) would hang the request.
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error(`SMTP connect to ${SMTP_HOST}:${SMTP_PORT} timed out after 15s`)), 15_000);
+  });
+  return Promise.race([connecting, timeout]);
+}
+
+/** Login + quit without sending anything — the Settings live test uses this. */
+export async function smtpVerify(env: Env): Promise<void> {
+  const mailer = await smtpConnect(env);
+  await mailer.close().catch(() => {});
+}
+
+async function smtpSend(env: Env, args: SendArgs): Promise<{ id: string; threadId: string }> {
+  const messageId = newMessageId(env);
+  const headers: Record<string, string> = { 'Message-ID': messageId };
+  if (args.inReplyTo) headers['In-Reply-To'] = args.inReplyTo;
+  if (args.references) headers['References'] = args.references;
+  if (args.listUnsubscribe && env.SENDER_EMAIL) {
+    headers['List-Unsubscribe'] = `<mailto:${env.SENDER_EMAIL}?subject=unsubscribe>`;
+  }
+
+  // Connect/auth failures happen before anything is sent — unambiguous.
+  let mailer: Awaited<ReturnType<typeof smtpConnect>>;
+  try {
+    mailer = await smtpConnect(env);
+  } catch (err) {
+    throw new GmailSendError(`smtp connect failed: ${String(err)}`, null, false);
+  }
+  try {
+    await mailer.send({
+      from: env.SENDER_NAME
+        ? { name: env.SENDER_NAME.replace(/"/g, ''), email: env.SENDER_EMAIL! }
+        : env.SENDER_EMAIL!,
+      to: args.to,
+      subject: args.subject,
+      text: args.body,
+      headers,
+    });
+  } catch (err) {
+    // A drop after DATA was accepted still delivers — never blind-retry.
+    throw new GmailSendError(`smtp send failed: ${String(err)}`, null, true);
+  } finally {
+    await mailer.close().catch(() => {});
+  }
+  return { id: messageId, threadId: args.threadId ?? messageId };
+}
+
 export async function gmailSend(env: Env, args: SendArgs): Promise<{ id: string; threadId: string }> {
+  // OAuth wins when both are configured: real thread ids keep the reply
+  // watcher and Gmail's own thread view perfectly aligned.
+  if (!oauthConfigured(env)) {
+    if (smtpConfigured(env)) return smtpSend(env, args);
+    throw new GmailSendError('gmail is not connected (no OAuth tokens and no app password)', null, false);
+  }
   const from = env.SENDER_NAME
     ? `"${env.SENDER_NAME.replace(/"/g, '')}" <${env.SENDER_EMAIL}>`
     : `${env.SENDER_EMAIL}`;
@@ -131,7 +228,25 @@ export async function gmailSend(env: Env, args: SendArgs): Promise<{ id: string;
 export async function gmailThreadReplyHeaders(
   env: Env,
   threadId: string,
+  db?: D1Database,
 ): Promise<{ inReplyTo?: string; references?: string }> {
+  if (!oauthConfigured(env)) {
+    // SMTP mode: rebuild threading from the Message-IDs we minted ourselves.
+    // The LIKE '<%' filter skips rows written by the REST path — those store
+    // opaque Gmail API ids, which are NOT valid RFC 822 Message-IDs.
+    if (!db) return {};
+    const rows = await db
+      .prepare(
+        `SELECT gmail_message_id FROM email_log
+         WHERE gmail_thread_id = ? AND gmail_message_id LIKE '<%' AND dry_run = 0
+         ORDER BY id DESC LIMIT 10`,
+      )
+      .bind(threadId)
+      .all<{ gmail_message_id: string }>();
+    const ids = rows.results.map((r) => r.gmail_message_id).reverse();
+    if (!ids.length) return {};
+    return { inReplyTo: ids[ids.length - 1], references: ids.join(' ') };
+  }
   const res = await gmailFetch(
     env,
     `/threads/${threadId}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References`,
